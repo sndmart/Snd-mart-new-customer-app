@@ -22,44 +22,43 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Inject Environment Variables
+      - name: Locate Project and Setup Files
         run: |
-          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
-          echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> .env
-          echo "VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}" >> .env
-          echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> .env
-          echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> .env
+          # Gradlew wali exact directory dhoondo
+          GRADLE_DIR=$(dirname $(find . -name "gradlew" | head -n 1))
+          echo "Project directory: $GRADLE_DIR"
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
 
-      - name: Restore google-services.json
-        run: |
-          # Har app folder ke andar google-services.json create karein
-          for d in $(find . -type d -name "app"); do
-            echo "${{ secrets.GOOGLE_SERVICES_JSON }}" > "$d/google-services.json"
+          # Inject environment variables into project root and app dir
+          for d in "$GRADLE_DIR" "$GRADLE_DIR/app"; do
+            mkdir -p "$d"
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$d/.env"
+            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> "$d/.env"
+            echo "VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}" >> "$d/.env"
+            echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> "$d/.env"
+            echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> "$d/.env"
           done
 
-      - name: Restore and Copy Keystore Everywhere
-        run: |
-          # Decode keystore file
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > upload-key.jks
-          
-          # Root aur subfolders mein copies place karein
-          cp upload-key.jks signing.keystore
-          
-          for d in $(find . -type d -name "app"); do
-            cp upload-key.jks "$d/upload-key.jks"
-            cp upload-key.jks "$d/signing.keystore"
+          # Place google-services.json wherever app folder exists
+          find . -type d -name "app" | while read -r appdir; do
+            echo "${{ secrets.GOOGLE_SERVICES_JSON }}" > "$appdir/google-services.json"
           done
 
-          find . -type f -name "build.gradle*" -exec dirname {} \; | while read dir; do
-            cp upload-key.jks "$dir/upload-key.jks" 2>/dev/null || true
+          # Decode keystore
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > "$GRADLE_DIR/upload-key.jks"
+          cp "$GRADLE_DIR/upload-key.jks" "$GRADLE_DIR/signing.keystore"
+
+          # Distribute keystore into all subdirectories and app folders
+          find . -type d -name "app" | while read -r appdir; do
+            cp "$GRADLE_DIR/upload-key.jks" "$appdir/upload-key.jks"
+            cp "$GRADLE_DIR/upload-key.jks" "$appdir/signing.keystore"
           done
 
-      - name: Make Gradlew Executable
-        run: |
-          chmod +x ./gradlew 2>/dev/null || true
-          find . -name "gradlew" -exec chmod +x {} \;
+          # Make gradlew executable
+          chmod +x "$GRADLE_DIR/gradlew"
 
       - name: Build Android App Bundle (AAB)
+        working-directory: ${{ env.GRADLE_DIR }}
         run: ./gradlew bundleRelease
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
