@@ -22,44 +22,45 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Locate Project and Setup Files
+      - name: Inject Environment Variables
         run: |
-          # Gradlew wali exact directory dhoondo
-          GRADLE_DIR=$(dirname $(find . -name "gradlew" | head -n 1))
-          echo "Project directory: $GRADLE_DIR"
-          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
-
-          # Inject environment variables into project root and app dir
-          for d in "$GRADLE_DIR" "$GRADLE_DIR/app"; do
-            mkdir -p "$d"
-            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$d/.env"
-            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> "$d/.env"
-            echo "VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}" >> "$d/.env"
-            echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> "$d/.env"
-            echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> "$d/.env"
+          for dir in . $(find . -type d -name "app" -exec dirname {} \;); do
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$dir/.env"
+            echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> "$dir/.env"
+            echo "VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}" >> "$dir/.env"
+            echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> "$dir/.env"
+            echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> "$dir/.env"
           done
 
-          # Place google-services.json wherever app folder exists
-          find . -type d -name "app" | while read -r appdir; do
-            echo "${{ secrets.GOOGLE_SERVICES_JSON }}" > "$appdir/google-services.json"
+      - name: Setup Keystore and Google Services
+        run: |
+          # Keystore decode
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > upload-key.jks
+          cp upload-key.jks signing.keystore
+
+          # Har app directory mein copy karo
+          for appdir in $(find . -type d -name "app"); do
+            cp upload-key.jks "$appdir/upload-key.jks"
+            cp upload-key.jks "$appdir/signing.keystore"
+            if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
+              echo "${{ secrets.GOOGLE_SERVICES_JSON }}" > "$appdir/google-services.json"
+            fi
           done
 
-          # Decode keystore
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > "$GRADLE_DIR/upload-key.jks"
-          cp "$GRADLE_DIR/upload-key.jks" "$GRADLE_DIR/signing.keystore"
-
-          # Distribute keystore into all subdirectories and app folders
-          find . -type d -name "app" | while read -r appdir; do
-            cp "$GRADLE_DIR/upload-key.jks" "$appdir/upload-key.jks"
-            cp "$GRADLE_DIR/upload-key.jks" "$appdir/signing.keystore"
+          # Har folder jisme build.gradle hai wahan bhi copy karo
+          for bdir in $(find . -name "build.gradle*" -exec dirname {} \;); do
+            cp upload-key.jks "$bdir/upload-key.jks" 2>/dev/null || true
+            cp upload-key.jks "$bdir/signing.keystore" 2>/dev/null || true
           done
-
-          # Make gradlew executable
-          chmod +x "$GRADLE_DIR/gradlew"
 
       - name: Build Android App Bundle (AAB)
-        working-directory: ${{ env.GRADLE_DIR }}
-        run: ./gradlew bundleRelease
+        run: |
+          # Agar gradlew nahi hai to create karo
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+          ./gradlew bundleRelease
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -67,6 +68,7 @@ jobs:
 
       - name: Upload Signed Bundle Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: sndmart-release-bundle
           path: "**/build/outputs/bundle/release/*.aab"
