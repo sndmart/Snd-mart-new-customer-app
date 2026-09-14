@@ -30,12 +30,16 @@ jobs:
           echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> .env
           echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> .env
 
-      - name: Restore Keystore File
+      - name: Restore Keystore to All Locations
         run: |
           mkdir -p app
           echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > app/signing.keystore
+          # Copy to upload-key.jks in root and in app directory
+          cp app/signing.keystore upload-key.jks
+          cp app/signing.keystore app/upload-key.jks
+          cp app/signing.keystore signing.keystore
 
-      - name: Make Gradlew Executable or Wrapper Setup
+      - name: Make Gradlew Executable
         run: |
           if [ ! -f "gradlew" ]; then
             gradle wrapper
