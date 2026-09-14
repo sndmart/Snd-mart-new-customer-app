@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sndmart — Native Android App Preview</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      line-height: 1.5;
+    }
+    header {
+      padding: 20px 28px;
+      border-bottom: 1px solid #21262d;
+      background: #161b22;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .app-badge {
+      background: linear-gradient(135deg, #2E7D32, #1B5E20);
+      color: #ffffff;
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.5px;
+      box-shadow: 0 4px 12px rgba(46, 125, 50, 0.4);
+    }
+    .header-text h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .header-text p {
+      color: #8b949e;
+      font-size: 13px;
+    }
+    .notice-banner {
+      background: rgba(46, 125, 50, 0.12);
+      border-left: 4px solid #2E7D32;
+      border-radius: 6px;
+      padding: 14px 20px;
+      margin: 24px auto;
+      max-width: 1080px;
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      font-size: 13.5px;
+      color: #c9d1d9;
+    }
+    .notice-banner strong { color: #56d364; }
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 20px 60px;
+    }
+    .gallery-grid {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      gap: 40px;
+      flex-wrap: wrap;
+      margin-top: 24px;
+    }
+    .phone-container {
+      background: #010409;
+      border: 12px solid #2d333b;
+      border-radius: 46px;
+      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.8), 0 0 0 1px #444c56;
+      width: 375px;
+      max-width: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .phone-notch {
+      background: #2d333b;
+      height: 24px;
+      width: 140px;
+      margin: 0 auto;
+      border-bottom-left-radius: 14px;
+      border-bottom-right-radius: 14px;
+    }
+    .phone-screen {
+      background: #ffffff;
+      width: 100%;
+    }
+    .phone-screen img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .phone-caption {
+      background: #161b22;
+      padding: 14px 18px;
+      border-top: 1px solid #30363d;
+      text-align: center;
+    }
+    .phone-caption h3 {
+      font-size: 15px;
+      color: #f0f6fc;
+      margin-bottom: 4px;
+    }
+    .phone-caption p {
+      font-size: 12px;
+      color: #8b949e;
+    }
+    .info-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 16px;
+      padding: 24px;
+      width: 440px;
+      max-width: 100%;
+    }
+    .info-card h2 {
+      font-size: 18px;
+      margin-bottom: 14px;
+      color: #f0f6fc;
+    }
+    .info-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .info-list li {
+      display: flex;
+      gap: 12px;
+      font-size: 13.5px;
+      color: #c9d1d9;
+    }
+    .info-list .icon {
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+    .info-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      font-size: 11px;
+      color: #79c0ff;
+      margin-right: 6px;
+      font-family: monospace;
+    }
+    .widget-preview {
+      margin-top: 24px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .widget-preview img {
+      display: block;
+      margin: 8px auto;
+      max-width: 100%;
+      border-radius: 8px;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-left">
+      <div class="app-badge">Sndmart</div>
+      <div class="header-text">
+        <h1>Sndmart Android Application</h1>
+        <p>Fresh Groceries, Fruits & Hotel Food Delivery — Jetpack Compose</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="notice-banner">
+      <div style="font-size: 22px;">ℹ️</div>
+      <div>
+        <strong>Native Android Application Note:</strong><br>
+        Sndmart is a 100% native Android app written in <strong>Kotlin + Jetpack Compose</strong> with Supabase backend and Google Play Location services. Native Android code runs on Android OS (devices or Android emulators), not as a web browser client. The preview below is a high-fidelity visual rendering of the actual Compose UI generated via <strong>Roborazzi</strong>.
+      </div>
+    </div>
+
+    <div class="gallery-grid">
+      <!-- Mobile Phone Mockup -->
+      <div class="phone-container">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <img src="home_screen.png" alt="Sndmart Home Screen Jetpack Compose UI">
+        </div>
+        <div class="phone-caption">
+          <h3>Home Screen (Jetpack Compose)</h3>
+          <p>City delivery bar, 15-min banner, category pills, & product cards</p>
+        </div>
+      </div>
+
+      <!-- App Features and Architecture -->
+      <div class="info-card">
+        <h2>Architecture & Highlights</h2>
+        <ul class="info-list">
+          <li>
+            <span class="icon">📍</span>
+            <div>
+              <strong>GPS & City Detection</strong><br>
+              Automatic high-accuracy location detector matching user coordinates to supported delivery cities via Supabase RPC.
+            </div>
+          </li>
+          <li>
+            <span class="icon">⚡</span>
+            <div>
+              <strong>Dual Mode Delivery</strong><br>
+              Browse 15-minute quick grocery, fresh vegetables, fruits or order from local hotel restaurants with single-hotel cart validation.
+            </div>
+          </li>
+          <li>
+            <span class="icon">🛒</span>
+            <div>
+              <strong>Live Pricing & Cart</strong><br>
+              Fresh price verification, quantity stepper controls, multi-item checkout, and delivery address picker.
+            </div>
+          </li>
+          <li>
+            <span class="icon">📱</span>
+            <div>
+              <strong>How to run on device / emulator:</strong><br>
+              Export the repository to Android Studio or download the APK to install directly on an Android device (Android 7.0+ / API 24-36).
+            </div>
+          </li>
+        </ul>
+
+        <div class="widget-preview">
+          <p style="font-size: 12px; color: #8b949e; margin-bottom: 6px;">
+            <span class="info-badge">Roborazzi</span> Price & Unit Display Component
+          </p>
+          <img src="greeting.png" alt="PriceDisplay Component">
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
+
