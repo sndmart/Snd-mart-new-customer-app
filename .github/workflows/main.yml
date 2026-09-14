@@ -32,7 +32,8 @@ jobs:
 
       - name: Restore Keystore File
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/signing.keystore
+          mkdir -p app
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > app/signing.keystore
 
       - name: Build Android App Bundle (AAB)
         run: ./gradlew bundleRelease
