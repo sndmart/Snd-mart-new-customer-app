@@ -1,0 +1,67 @@
+{
+  "project_info": {
+    "project_number": "1019393673460",
+    "project_id": "newsndmart",
+    "storage_bucket": "newsndmart.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1019393673460:android:309a12db7d1a8aadce76a1",
+        "android_client_info": {
+          "package_name": "com.aistudio.sndmartvendor.vmrtxz"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDjTw-SFBq2PYWRtC9As2WiKr49Sdo2Ido"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1019393673460:android:b9929216cc779775ce76a1",
+        "android_client_info": {
+          "package_name": "com.sndmart.delivery"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDjTw-SFBq2PYWRtC9As2WiKr49Sdo2Ido"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1019393673460:android:b4d92422cffc4c2ece76a1",
+        "android_client_info": {
+          "package_name": "in.sndmart.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDjTw-SFBq2PYWRtC9As2WiKr49Sdo2Ido"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
