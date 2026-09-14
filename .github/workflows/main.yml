@@ -35,6 +35,13 @@ jobs:
           mkdir -p app
           echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > app/signing.keystore
 
+      - name: Make Gradlew Executable or Wrapper Setup
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
       - name: Build Android App Bundle (AAB)
         run: ./gradlew bundleRelease
         env:
