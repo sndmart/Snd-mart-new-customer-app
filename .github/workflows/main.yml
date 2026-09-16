@@ -24,12 +24,22 @@ jobs:
 
       - name: Prepare Keystore File
         run: |
-          # signing.keystore ko upload-key.jks naam se copy kar do taaki gradle ko mil jaye
+          # signing.keystore ko upload-key.jks naam se copy karna
           find . -name "signing.keystore" -execdir cp signing.keystore upload-key.jks \; 2>/dev/null || true
           find . -name "gradlew" -exec chmod +x {} \;
 
       - name: Build Android App Bundle (AAB)
-        run: ./gradlew bundleRelease
+        run: |
+          # gradlew jahan bhi hai uska directory path auto-detect karega
+          GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+          if [ -z "$GRADLE_PATH" ]; then
+            echo "Error: gradlew file project me kahin nahi mili!"
+            exit 1
+          fi
+          GRADLE_DIR=$(dirname "$GRADLE_PATH")
+          echo "Found Gradle in directory: $GRADLE_DIR"
+          cd "$GRADLE_DIR"
+          ./gradlew bundleRelease
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
