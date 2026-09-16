@@ -29,7 +29,6 @@ jobs:
           find . -name "gradlew" -exec chmod +x {} \;
 
       - name: Build Android App Bundle (AAB)
-        working-directory: Snd-mart-new-customer-app
         run: ./gradlew bundleRelease
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -40,5 +39,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sndmart-release-bundle
-          path: "**/build/outputs/bundle/release/*.aab"
-          
+          path: "*/build/outputs/bundle/release/.aab"
