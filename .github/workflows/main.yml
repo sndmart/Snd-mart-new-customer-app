@@ -30,7 +30,7 @@ jobs:
       - name: Build Signed Android App Bundle (AAB)
         run: gradle :app:bundleRelease --no-daemon
         env:
-          KEYSTORE_PATH: app/signing.keystore
+          KEYSTORE_PATH: ${{ github.workspace }}/app/signing.keystore
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
