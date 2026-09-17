@@ -757,7 +757,8 @@ class SndmartRepository(
                 categoryId = catQuery,
                 vendorId = "is.null",
                 name = nameQuery,
-                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured," +
+                    "product_variants(id,label,is_active,product_variant_city_stock(city_id,price,stock_qty,is_available))",
                 limit = limit,
                 offset = offset
             )
@@ -800,7 +801,8 @@ class SndmartRepository(
                     effectivePrice = price,
                     effectiveMrp = mrp,
                     effectiveStock = stock,
-                    effectiveIsAvailable = isAvail
+                    effectiveIsAvailable = isAvail,
+                    variants = resolveVariantsForCity(prod.variants, cityId)
                 )
             }.sortedWith(
                 compareByDescending<ResolvedProduct> { it.isInStockAndActive }
@@ -811,6 +813,25 @@ class SndmartRepository(
             Log.w(TAG, "Exception fetching grocery products: ${e.message}", e)
             Result.failure(e)
         }
+    }
+
+    // Resolves a product's variants down to the given city's price/stock, filtering out
+    // inactive variants and sorting by price ascending (cheapest first, for the picker).
+    private fun resolveVariantsForCity(variants: List<ProductVariant>?, cityId: String): List<ResolvedVariant> {
+        if (variants.isNullOrEmpty()) return emptyList()
+        return variants
+            .filter { it.isActive }
+            .mapNotNull { variant ->
+                val cityStock = variant.cityStock?.firstOrNull { it.cityId == cityId } ?: return@mapNotNull null
+                ResolvedVariant(
+                    id = variant.id,
+                    label = variant.label,
+                    price = cityStock.price,
+                    stock = cityStock.stockQty ?: 0,
+                    isAvailable = cityStock.isAvailable
+                )
+            }
+            .sortedBy { it.price }
     }
 
     suspend fun getHotelMenu(vendorId: String, cityId: String): Result<Pair<List<Category>, List<ResolvedProduct>>> {
@@ -923,7 +944,8 @@ class SndmartRepository(
                 val prodDeferred = async {
                     api.getProductsByIds(
                         idInQuery = "in.(${productIds.joinToString(",")})",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured"
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured," +
+                            "product_variants(id,label,is_active,product_variant_city_stock(city_id,price,stock_qty,is_available))"
                     )
                 }
                 val stockDeferred = async {
@@ -959,7 +981,8 @@ class SndmartRepository(
                         effectivePrice = price,
                         effectiveMrp = mrp,
                         effectiveStock = stock,
-                        effectiveIsAvailable = isAvail
+                        effectiveIsAvailable = isAvail,
+                        variants = resolveVariantsForCity(prod.variants, cityId)
                     )
                 }
 
@@ -968,7 +991,10 @@ class SndmartRepository(
                 }
 
                 if (resolvedProd != null) {
-                    list.add(CartItemUi(cartItem = item, product = resolvedProd))
+                    val matchedVariant = item.variantId?.let { vId ->
+                        resolvedProd.variants.firstOrNull { it.id == vId }
+                    }
+                    list.add(CartItemUi(cartItem = item, product = resolvedProd, variant = matchedVariant))
                 }
             }
             Result.success(list)
@@ -1025,12 +1051,15 @@ class SndmartRepository(
     }
 
     // --- CART OPERATIONS ---
+    // A distinct (productId, variantId) pair is its own cart line — e.g. 500g and 1kg of
+    // the same grocery product are always separate lines with separate quantities.
     fun addToCart(
         productId: String,
         vendorId: String?,
         cityId: String?,
         quantityDelta: Int = 1,
-        isHotel: Boolean
+        isHotel: Boolean,
+        variantId: String? = null
     ): AddToCartResult {
         val currentUserId = sessionManager.userId.value ?: "guest"
         if (isHotel) {
@@ -1042,20 +1071,21 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = vendorId,
                     cityId = cityId,
                     quantity = quantityDelta
                 )
                 return AddToCartResult.HotelConflict(existingVendor, vendorId, pending)
             }
-            val existing = currentList.find { it.productId == productId }
+            val existing = currentList.find { it.productId == productId && it.variantId == variantId }
             if (existing != null) {
                 val newQty = existing.quantity + quantityDelta
                 if (newQty <= 0) {
-                    _hotelCart.value = currentList.filter { it.productId != productId }
+                    _hotelCart.value = currentList.filter { it != existing }
                 } else {
                     _hotelCart.value = currentList.map {
-                        if (it.productId == productId) it.copy(quantity = newQty) else it
+                        if (it == existing) it.copy(quantity = newQty) else it
                     }
                 }
             } else if (quantityDelta > 0) {
@@ -1063,6 +1093,7 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = vendorId,
                     cityId = cityId,
                     quantity = quantityDelta
@@ -1071,14 +1102,14 @@ class SndmartRepository(
             }
         } else {
             val currentList = _groceryCart.value
-            val existing = currentList.find { it.productId == productId }
+            val existing = currentList.find { it.productId == productId && it.variantId == variantId }
             if (existing != null) {
                 val newQty = existing.quantity + quantityDelta
                 if (newQty <= 0) {
-                    _groceryCart.value = currentList.filter { it.productId != productId }
+                    _groceryCart.value = currentList.filter { it != existing }
                 } else {
                     _groceryCart.value = currentList.map {
-                        if (it.productId == productId) it.copy(quantity = newQty) else it
+                        if (it == existing) it.copy(quantity = newQty) else it
                     }
                 }
             } else if (quantityDelta > 0) {
@@ -1086,6 +1117,7 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = null,
                     cityId = cityId,
                     quantity = quantityDelta
@@ -1102,23 +1134,23 @@ class SndmartRepository(
         persistCartToBackend()
     }
 
-    fun updateCartItemQuantity(productId: String, isHotel: Boolean, newQty: Int) {
+    fun updateCartItemQuantity(productId: String, isHotel: Boolean, newQty: Int, variantId: String? = null) {
         if (isHotel) {
             val current = _hotelCart.value
             if (newQty <= 0) {
-                _hotelCart.value = current.filter { it.productId != productId }
+                _hotelCart.value = current.filter { !(it.productId == productId && it.variantId == variantId) }
             } else {
                 _hotelCart.value = current.map {
-                    if (it.productId == productId) it.copy(quantity = newQty) else it
+                    if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                 }
             }
         } else {
             val current = _groceryCart.value
             if (newQty <= 0) {
-                _groceryCart.value = current.filter { it.productId != productId }
+                _groceryCart.value = current.filter { !(it.productId == productId && it.variantId == variantId) }
             } else {
                 _groceryCart.value = current.map {
-                    if (it.productId == productId) it.copy(quantity = newQty) else it
+                    if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                 }
             }
         }

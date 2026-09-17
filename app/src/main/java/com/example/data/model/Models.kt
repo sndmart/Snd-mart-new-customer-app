@@ -74,7 +74,24 @@ data class Product(
     @Json(name = "stock_quantity") val stockQuantity: Int? = null,
     @Json(name = "is_available") val isAvailable: Boolean = true,
     @Json(name = "is_active") val isActive: Boolean = true,
-    @Json(name = "is_featured") val isFeatured: Boolean? = false
+    @Json(name = "is_featured") val isFeatured: Boolean? = false,
+    @Json(name = "product_variants") val variants: List<ProductVariant>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ProductVariantCityStock(
+    @Json(name = "city_id") val cityId: String = "",
+    val price: Double = 0.0,
+    @Json(name = "stock_qty") val stockQty: Int? = 0,
+    @Json(name = "is_available") val isAvailable: Boolean = true
+)
+
+@JsonClass(generateAdapter = true)
+data class ProductVariant(
+    val id: String = "",
+    val label: String = "",
+    @Json(name = "is_active") val isActive: Boolean = true,
+    @Json(name = "product_variant_city_stock") val cityStock: List<ProductVariantCityStock>? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -87,13 +104,27 @@ data class ProductCityStock(
     @Json(name = "is_available") val isAvailable: Boolean = true
 )
 
-// UI Model: Product resolved with fresh city price & stock override
+// UI Model: a single product variant (e.g. "500g") resolved with fresh city price & stock
+data class ResolvedVariant(
+    val id: String,
+    val label: String,
+    val price: Double,
+    val stock: Int,
+    val isAvailable: Boolean
+) {
+    val isInStock: Boolean get() = isAvailable && stock > 0
+}
+
+// UI Model: Product resolved with fresh city price & stock override. When `variants` is
+// non-empty, the base product's own price/mrp/stock are ignored in the UI in favor of the
+// per-variant price/stock below (see ResolvedProduct.startingPrice).
 data class ResolvedProduct(
     val baseProduct: Product,
     val effectivePrice: Double,
     val effectiveMrp: Double?,
     val effectiveStock: Int,
-    val effectiveIsAvailable: Boolean
+    val effectiveIsAvailable: Boolean,
+    val variants: List<ResolvedVariant> = emptyList()
 ) {
     val id: String get() = baseProduct.id
     val name: String get() = baseProduct.name
@@ -104,8 +135,15 @@ data class ResolvedProduct(
     val categoryId: String? get() = baseProduct.categoryId
     val isFeatured: Boolean get() = baseProduct.isFeatured == true
     val isActive: Boolean get() = baseProduct.isActive
+    val hasVariants: Boolean get() = variants.isNotEmpty()
+    // "Starting from ₹X" price shown on the product card when it has variants.
+    val startingPrice: Double get() = if (hasVariants) variants.minOf { it.price } else effectivePrice
     val isInStockAndActive: Boolean
-        get() = baseProduct.isActive && effectiveIsAvailable && effectiveStock > 0
+        get() = baseProduct.isActive && if (hasVariants) {
+            variants.any { it.isInStock }
+        } else {
+            effectiveIsAvailable && effectiveStock > 0
+        }
     val isHotelItemAvailable: Boolean
         get() = baseProduct.isActive && effectiveIsAvailable && (effectiveStock > 0 || baseProduct.stockQty == null)
 }
@@ -121,12 +159,16 @@ data class CartItem(
     val quantity: Int = 1
 )
 
-// UI Model for Cart item with freshly fetched product data
+// UI Model for Cart item with freshly fetched product data. `variant` is set when this
+// cart line is for a specific product variant (e.g. "500g") rather than the base product.
 data class CartItemUi(
     val cartItem: CartItem,
-    val product: ResolvedProduct
+    val product: ResolvedProduct,
+    val variant: ResolvedVariant? = null
 ) {
-    val totalPrice: Double get() = product.effectivePrice * cartItem.quantity
+    val effectivePrice: Double get() = variant?.price ?: product.effectivePrice
+    val displayName: String get() = if (variant != null) "${product.name} - ${variant.label}" else product.name
+    val totalPrice: Double get() = effectivePrice * cartItem.quantity
 }
 
 @JsonClass(generateAdapter = true)

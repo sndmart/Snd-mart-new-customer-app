@@ -88,6 +88,9 @@ fun HomeScreen(
     // Conflict Dialog state
     var pendingHotelConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
 
+    // Variant picker bottom sheet state: non-null while a "Select Size" product's sheet is open
+    var variantPickerProduct by remember { mutableStateOf<ResolvedProduct?>(null) }
+
     // Snackbar host
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -280,6 +283,37 @@ fun HomeScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    // Variant size picker: opened via "Select Size" on a product that has variants.
+    val variantProduct = variantPickerProduct
+    val variantPickerCity = selectedCity
+    if (variantProduct != null && variantPickerCity != null) {
+        VariantPickerBottomSheet(
+            product = variantProduct,
+            groceryCart = groceryCart,
+            onIncrease = { variantId ->
+                repository.addToCart(
+                    productId = variantProduct.id,
+                    variantId = variantId,
+                    vendorId = null,
+                    cityId = variantPickerCity.id,
+                    quantityDelta = 1,
+                    isHotel = false
+                )
+            },
+            onDecrease = { variantId ->
+                repository.addToCart(
+                    productId = variantProduct.id,
+                    variantId = variantId,
+                    vendorId = null,
+                    cityId = variantPickerCity.id,
+                    quantityDelta = -1,
+                    isHotel = false
+                )
+            },
+            onDismiss = { variantPickerProduct = null }
         )
     }
 
@@ -486,8 +520,12 @@ fun HomeScreen(
                             }
                         } else {
                             items(filteredProducts, key = { it.id }) { product ->
-                                val inCartItem = groceryCart.find { it.productId == product.id }
-                                val quantityInCart = inCartItem?.quantity ?: 0
+                                // For a product without variants there's exactly one cart line
+                                // (variantId == null). For a product with variants, this is the
+                                // total quantity across all its variant lines (badge only).
+                                val quantityInCart = groceryCart
+                                    .filter { it.productId == product.id }
+                                    .sumOf { it.quantity }
 
                                 GroceryProductCard(
                                     product = product,
@@ -509,7 +547,8 @@ fun HomeScreen(
                                             quantityDelta = -1,
                                             isHotel = false
                                         )
-                                    }
+                                    },
+                                    onSelectSize = { variantPickerProduct = product }
                                 )
                             }
 
@@ -706,7 +745,8 @@ fun GroceryProductCard(
     product: ResolvedProduct,
     quantityInCart: Int,
     onIncrease: () -> Unit,
-    onDecrease: () -> Unit
+    onDecrease: () -> Unit,
+    onSelectSize: () -> Unit = {}
 ) {
     val isInStockAndActive = product.isInStockAndActive
 
@@ -790,18 +830,52 @@ fun GroceryProductCard(
                 color = if (isInStockAndActive) TextPrimary else TextMuted
             )
 
-            PriceDisplay(
-                price = product.effectivePrice,
-                mrp = product.effectiveMrp,
-                unit = product.unit,
-                modifier = Modifier
-                    .padding(vertical = 4.dp)
-                    .alpha(if (isInStockAndActive) 1f else 0.7f)
-            )
+            if (product.hasVariants) {
+                Text(
+                    text = "Starting from ₹${"%.0f".format(product.startingPrice)}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = PriceGreen,
+                    modifier = Modifier
+                        .padding(vertical = 4.dp)
+                        .alpha(if (isInStockAndActive) 1f else 0.7f)
+                )
+            } else {
+                PriceDisplay(
+                    price = product.effectivePrice,
+                    mrp = product.effectiveMrp,
+                    unit = product.unit,
+                    modifier = Modifier
+                        .padding(vertical = 4.dp)
+                        .alpha(if (isInStockAndActive) 1f else 0.7f)
+                )
+            }
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            if (isInStockAndActive) {
+            if (isInStockAndActive && product.hasVariants) {
+                Button(
+                    onClick = onSelectSize,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(36.dp)
+                        .testTag("grocery_${product.id}_select_size"),
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (quantityInCart > 0) NaturalPrimary else NaturalPrimary.copy(alpha = 0.12f),
+                        contentColor = if (quantityInCart > 0) Color.White else NaturalPrimary
+                    )
+                ) {
+                    Text(
+                        text = if (quantityInCart > 0) "$quantityInCart Added · Select Size" else "Select Size",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else if (isInStockAndActive) {
                 QuantityStepper(
                     quantity = quantityInCart,
                     onIncrease = onIncrease,
@@ -828,6 +902,96 @@ fun GroceryProductCard(
                     }
                 }
             }
+        }
+    }
+}
+
+// Bottom sheet listing a product's variants (e.g. 250g/500g/1kg), sorted cheapest first.
+// Each row has its own quantity stepper so two variants of the same product can be in the
+// cart at once as separate lines.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VariantPickerBottomSheet(
+    product: ResolvedProduct,
+    groceryCart: List<CartItem>,
+    onIncrease: (variantId: String) -> Unit,
+    onDecrease: (variantId: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Text(
+                text = product.name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Select a size",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+            )
+            product.variants.forEach { variant ->
+                val quantityInCart = groceryCart
+                    .firstOrNull { it.productId == product.id && it.variantId == variant.id }
+                    ?.quantity ?: 0
+                VariantRow(
+                    variant = variant,
+                    quantityInCart = quantityInCart,
+                    onIncrease = { onIncrease(variant.id) },
+                    onDecrease = { onDecrease(variant.id) }
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun VariantRow(
+    variant: ResolvedVariant,
+    quantityInCart: Int,
+    onIncrease: () -> Unit,
+    onDecrease: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp)
+            .testTag("variant_row_${variant.id}"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = variant.label,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = if (variant.isInStock) TextPrimary else TextMuted
+            )
+            Text(
+                text = if (variant.isInStock) "₹${"%.0f".format(variant.price)}" else "Out of Stock",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (variant.isInStock) PriceGreen else NaturalBadgeRed
+            )
+        }
+        if (variant.isInStock) {
+            QuantityStepper(
+                quantity = quantityInCart,
+                onIncrease = onIncrease,
+                onDecrease = onDecrease,
+                testTagPrefix = "variant_${variant.id}"
+            )
         }
     }
 }

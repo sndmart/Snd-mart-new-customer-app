@@ -289,13 +289,15 @@ fun CartScreen(
                         }
                     }
 
-                    // Cart Items List
-                    items(freshItems, key = { it.cartItem.productId }) { itemUi ->
+                    // Cart Items List. Key includes variantId so two variants of the same
+                    // product (e.g. 500g and 1kg) render as distinct rows.
+                    items(freshItems, key = { "${it.cartItem.productId}_${it.cartItem.variantId}" }) { itemUi ->
                         CartItemRow(
                             item = itemUi,
                             onIncrease = {
                                 repository.updateCartItemQuantity(
                                     productId = itemUi.cartItem.productId,
+                                    variantId = itemUi.cartItem.variantId,
                                     isHotel = isHotelCartSelected,
                                     newQty = itemUi.cartItem.quantity + 1
                                 )
@@ -303,6 +305,7 @@ fun CartScreen(
                             onDecrease = {
                                 repository.updateCartItemQuantity(
                                     productId = itemUi.cartItem.productId,
+                                    variantId = itemUi.cartItem.variantId,
                                     isHotel = isHotelCartSelected,
                                     newQty = itemUi.cartItem.quantity - 1
                                 )
@@ -353,7 +356,7 @@ fun CartItemRow(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("cart_item_${item.cartItem.productId}"),
+            .testTag("cart_item_${item.cartItem.productId}_${item.cartItem.variantId}"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
@@ -381,14 +384,14 @@ fun CartItemRow(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = item.product.name,
+                    text = item.displayName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "₹${"%.0f".format(item.product.effectivePrice)}${if (!item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
+                    text = "₹${"%.0f".format(item.effectivePrice)}${if (item.variant == null && !item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -404,7 +407,7 @@ fun CartItemRow(
                 quantity = item.cartItem.quantity,
                 onIncrease = onIncrease,
                 onDecrease = onDecrease,
-                testTagPrefix = "cart_item_${item.cartItem.productId}"
+                testTagPrefix = "cart_item_${item.cartItem.productId}_${item.cartItem.variantId}"
             )
         }
     }
