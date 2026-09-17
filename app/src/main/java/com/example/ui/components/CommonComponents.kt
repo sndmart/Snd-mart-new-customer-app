@@ -20,9 +20,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.City
 import com.example.service.InAppNotification
 import com.example.ui.theme.*
@@ -333,7 +335,10 @@ fun ProductImage(
 ) {
     if (!url.isNullOrBlank()) {
         AsyncImage(
-            model = url,
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(url)
+                .crossfade(true)
+                .build(),
             contentDescription = contentDescription,
             modifier = modifier,
             contentScale = ContentScale.Crop

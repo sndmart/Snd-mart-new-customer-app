@@ -202,7 +202,7 @@ object SupabaseClient {
     private val loggingInterceptor = HttpLoggingInterceptor { message ->
         Log.d(TAG, message)
     }.apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        level = if (com.example.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
     }
 
     val okHttpClient: OkHttpClient by lazy {

@@ -225,12 +225,8 @@ fun HomeScreen(
         }
     }
 
-    // Initial category load
-    LaunchedEffect(Unit) {
-        loadGroceryCategories()
-    }
-
-    // Categories + hotels reload when the city changes.
+    // Categories load once on mount and again whenever the city changes (cheap: cached after
+    // the first successful fetch, and categories aren't city-scoped).
     LaunchedEffect(selectedCity?.id) {
         loadGroceryCategories()
         val cityId = selectedCity?.id ?: return@LaunchedEffect
@@ -245,16 +241,14 @@ fun HomeScreen(
         loadHotelsData(cityId, searchQuery)
     }
 
-    // Products reload immediately on city or category change.
-    LaunchedEffect(selectedCity?.id, selectedCategoryId) {
+    // Products reload on city/category change (immediately) or search text change (debounced).
+    // A single effect avoids firing two overlapping requests for the same params on mount.
+    var lastSearchQueryForProducts by remember { mutableStateOf(searchQuery) }
+    LaunchedEffect(selectedCity?.id, selectedCategoryId, searchQuery) {
         val cityId = selectedCity?.id ?: return@LaunchedEffect
-        loadGroceryProducts(cityId, searchQuery, selectedCategoryId)
-    }
-
-    // Products reload on search query change (debounced so typing doesn't spam backend).
-    LaunchedEffect(searchQuery) {
-        val cityId = selectedCity?.id ?: return@LaunchedEffect
-        delay(300)
+        val isSearchChange = searchQuery != lastSearchQueryForProducts
+        lastSearchQueryForProducts = searchQuery
+        if (isSearchChange) delay(300)
         loadGroceryProducts(cityId, searchQuery, selectedCategoryId)
     }
 
