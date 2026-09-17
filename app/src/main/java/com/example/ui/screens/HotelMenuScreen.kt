@@ -1,13 +1,23 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Fastfood
+import androidx.compose.material.icons.outlined.Restaurant
+import androidx.compose.material.icons.outlined.RestaurantMenu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,13 +27,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.model.CartItem
-import com.example.data.model.Category
-import com.example.data.model.ResolvedProduct
-import com.example.data.model.Vendor
+import com.example.data.model.*
 import com.example.data.repository.AddToCartResult
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.*
@@ -49,7 +57,8 @@ fun HotelMenuScreen(
     cityId: String,
     repository: SndmartRepository,
     onBack: () -> Unit,
-    onNavigateToCart: () -> Unit
+    onNavigateToCart: () -> Unit,
+    onProceedToCheckout: (isHotel: Boolean) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -57,11 +66,45 @@ fun HotelMenuScreen(
     var vendor by remember { mutableStateOf<Vendor?>(null) }
     var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
     var allProducts by remember { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
+    var selectedCategoryId by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val hotelCart by repository.hotelCart.collectAsState()
     var pendingConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
+
+    val thisHotelCartItems = remember(hotelCart, vendorId) {
+        hotelCart.filter { it.vendorId == vendorId || it.vendorId.isNullOrBlank() }
+    }
+    val thisHotelItemCount = thisHotelCartItems.sumOf { it.quantity }
+
+    var freshHotelCartItems by remember { mutableStateOf<List<CartItemUi>>(emptyList()) }
+    LaunchedEffect(hotelCart, cityId) {
+        if (cityId.isNotBlank() && hotelCart.isNotEmpty()) {
+            val res = repository.getFreshCartItems(isHotel = true, cityId = cityId)
+            if (res.isSuccess) {
+                freshHotelCartItems = res.getOrNull() ?: emptyList()
+            }
+        } else {
+            freshHotelCartItems = emptyList()
+        }
+    }
+
+    val thisHotelTotalPrice = remember(thisHotelCartItems, freshHotelCartItems, allProducts) {
+        val freshForThis = freshHotelCartItems.filter { it.cartItem.vendorId == vendorId || it.cartItem.vendorId.isNullOrBlank() }
+        if (freshForThis.isNotEmpty()) {
+            freshForThis.sumOf { it.totalPrice }
+        } else {
+            thisHotelCartItems.sumOf { item ->
+                val prod = allProducts.find { it.id == item.productId }
+                (prod?.effectivePrice ?: 0.0) * item.quantity
+            }
+        }
+    }
+
+    BackHandler {
+        onBack()
+    }
 
     fun loadMenu() {
         coroutineScope.launch {
@@ -82,6 +125,9 @@ fun HotelMenuScreen(
                     val pair = res.getOrNull()!!
                     categories = pair.first
                     allProducts = pair.second
+                    if (categories.isNotEmpty() && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
+                        selectedCategoryId = categories.first().id
+                    }
                 } else {
                     errorMessage = res.exceptionOrNull()?.message
                 }
@@ -92,6 +138,13 @@ fun HotelMenuScreen(
 
     LaunchedEffect(vendorId, cityId) {
         loadMenu()
+    }
+
+    // Default to first real category when categories load (never unfiltered "All")
+    LaunchedEffect(categories) {
+        if (categories.isNotEmpty() && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
+            selectedCategoryId = categories.first().id
+        }
     }
 
     // Re-fetch on resume
@@ -160,7 +213,10 @@ fun HotelMenuScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.testTag("hotel_menu_back_button")
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -185,44 +241,17 @@ fun HotelMenuScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            val count = hotelCart.sumOf { it.quantity }
-            if (count > 0) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shadowElevation = 8.dp,
-                    color = MaterialTheme.colorScheme.surface
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                "$count item(s) in Hotel Cart",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                "Single hotel checkout",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
-                            )
-                        }
-                        Button(
-                            onClick = onNavigateToCart,
-                            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                            shape = RoundedCornerShape(24.dp),
-                            modifier = Modifier.testTag("hotel_view_cart_button")
-                        ) {
-                            Text("View Cart")
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, modifier = Modifier.size(16.dp))
-                        }
-                    }
-                }
+            AnimatedVisibility(
+                visible = thisHotelItemCount > 0,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut()
+            ) {
+                FloatingCartButton(
+                    itemCount = thisHotelItemCount,
+                    totalPrice = thisHotelTotalPrice,
+                    onClick = { onProceedToCheckout(true) },
+                    testTag = "hotel_floating_checkout_button"
+                )
             }
         }
     ) { paddingValues ->
@@ -241,116 +270,122 @@ fun HotelMenuScreen(
                     onRetry = { loadMenu() },
                     modifier = Modifier.align(Alignment.Center)
                 )
-            } else if (allProducts.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No menu items currently listed for this hotel.", color = TextSecondary)
-                }
             } else {
                 val isHotelActive = vendor?.isActive ?: true
 
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
+                // Filter items reacting to the selected category (Swiggy-style)
+                // The item grid should always be filtered to whichever category is currently selected - never show all of this hotel's items unfiltered.
+                // Preserving existing sort logic: available+featured first, unavailable last
+                val displayedProducts = remember(allProducts, selectedCategoryId, isHotelActive) {
+                    val catId = selectedCategoryId
+                    if (catId == null) {
+                        emptyList()
+                    } else {
+                        val filtered = allProducts.filter { it.categoryId == catId }
+                        filtered.sortedWith(
+                            compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
+                                .thenByDescending { it.isFeatured }
+                                .thenBy { it.name.lowercase() }
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.fillMaxSize()) {
                     if (!isHotelActive) {
-                        item(key = "closed_warning_banner") {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                color = NaturalBadgeRed.copy(alpha = 0.12f),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f))
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = NaturalBadgeRed.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Info,
-                                        contentDescription = null,
-                                        tint = NaturalBadgeRed,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text(
-                                        text = "This restaurant is currently closed. You can browse the menu, but ordering is unavailable.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.Medium,
-                                        color = NaturalBadgeRed
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = NaturalBadgeRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "This restaurant is currently closed. You can browse the menu, but ordering is unavailable.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = NaturalBadgeRed
+                                )
                             }
                         }
                     }
 
-                    // If categories exist, group items or show all items with category headers
+                    // 1 & 4: Horizontal category row (fixed at top, does not scroll away)
                     if (categories.isNotEmpty()) {
-                        categories.forEach { category ->
-                            val prodsForCat = allProducts.filter { it.categoryId == category.id }
-                                .sortedWith(
-                                    compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
-                                        .thenBy { it.name.lowercase() }
+                        HotelCategoryTabsRow(
+                            categories = categories,
+                            selectedCategoryId = selectedCategoryId,
+                            onCategorySelected = { selectedCategoryId = it },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                            thickness = 1.dp
+                        )
+                    }
+
+                    // 3 & 4: Single scrollable grid/list of items below reacting to the selected tab
+                    if (displayedProducts.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    imageVector = Icons.Outlined.RestaurantMenu,
+                                    contentDescription = null,
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(48.dp)
                                 )
-                            if (prodsForCat.isNotEmpty()) {
-                                item(key = "cat_${category.id}") {
-                                    Text(
-                                        text = category.name,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = NaturalPrimary,
-                                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                                    )
-                                }
-                                items(prodsForCat, key = { it.id }) { product ->
-                                    val inCart = hotelCart.find { it.productId == product.id }
-                                    val qty = inCart?.quantity ?: 0
-                                    MenuItemCard(
-                                        product = product,
-                                        quantityInCart = qty,
-                                        isHotelActive = isHotelActive,
-                                        onIncrease = {
-                                            val res = repository.addToCart(
-                                                productId = product.id,
-                                                vendorId = vendorId,
-                                                cityId = cityId,
-                                                quantityDelta = 1,
-                                                isHotel = true
-                                            )
-                                            if (res is AddToCartResult.HotelConflict) {
-                                                pendingConflict = res
-                                            }
-                                        },
-                                        onDecrease = {
-                                            repository.addToCart(
-                                                productId = product.id,
-                                                vendorId = vendorId,
-                                                cityId = cityId,
-                                                quantityDelta = -1,
-                                                isHotel = true
-                                            )
-                                        }
-                                    )
-                                }
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = if (categories.isEmpty()) "No menu items currently listed for this hotel."
+                                    else "No items found in this category.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextMuted
+                                )
                             }
                         }
-
-                        // Also check items without category
-                        val uncategorized = allProducts.filter { prod -> categories.none { it.id == prod.categoryId } }
-                            .sortedWith(
-                                compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
-                                    .thenBy { it.name.lowercase() }
-                            )
-                        if (uncategorized.isNotEmpty()) {
-                            item(key = "cat_other") {
-                                Text(
-                                    text = "Other Special Dishes",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = NaturalPrimary,
-                                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                                )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("hotel_menu_items_list"),
+                            contentPadding = PaddingValues(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (!vendor?.bannerUrl.isNullOrBlank()) {
+                                item(key = "hotel_banner_header") {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(140.dp)
+                                            .clip(RoundedCornerShape(16.dp))
+                                    ) {
+                                        ProductImage(
+                                            url = vendor!!.bannerUrl,
+                                            contentDescription = vendorName,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
                             }
-                            items(uncategorized, key = { it.id }) { product ->
+
+                            items(displayedProducts, key = { it.id }) { product ->
                                 val inCart = hotelCart.find { it.productId == product.id }
                                 val qty = inCart?.quantity ?: 0
                                 MenuItemCard(
@@ -381,45 +416,130 @@ fun HotelMenuScreen(
                                 )
                             }
                         }
-                    } else {
-                        val sortedAll = allProducts.sortedWith(
-                            compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
-                                .thenBy { it.name.lowercase() }
-                        )
-                        items(sortedAll, key = { it.id }) { product ->
-                            val inCart = hotelCart.find { it.productId == product.id }
-                            val qty = inCart?.quantity ?: 0
-                            MenuItemCard(
-                                product = product,
-                                quantityInCart = qty,
-                                isHotelActive = isHotelActive,
-                                onIncrease = {
-                                    val res = repository.addToCart(
-                                        productId = product.id,
-                                        vendorId = vendorId,
-                                        cityId = cityId,
-                                        quantityDelta = 1,
-                                        isHotel = true
-                                    )
-                                    if (res is AddToCartResult.HotelConflict) {
-                                        pendingConflict = res
-                                    }
-                                },
-                                onDecrease = {
-                                    repository.addToCart(
-                                        productId = product.id,
-                                        vendorId = vendorId,
-                                        cityId = cityId,
-                                        quantityDelta = -1,
-                                        isHotel = true
-                                    )
-                                }
-                            )
-                        }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * Swiggy-style horizontal scrollable row of circular category tabs.
+ * Only the hotel's real categories (e.g. "Biriyani", "fast food") are displayed (no "All" tab).
+ * Selected category tab is visually highlighted with an active orange ring.
+ */
+@Composable
+fun HotelCategoryTabsRow(
+    categories: List<Category>,
+    selectedCategoryId: String?,
+    onCategorySelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 1.dp
+    ) {
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("hotel_category_tabs_row"),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            items(categories, key = { it.id }) { category ->
+                HotelCategoryCircleTab(
+                    title = category.name,
+                    imageUrl = category.imageUrl,
+                    isSelected = selectedCategoryId == category.id,
+                    onClick = { onCategorySelected(category.id) },
+                    testTag = "hotel_category_tab_${category.id}"
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Circular Category Tab Item (Swiggy-style):
+ * - 64dp circular avatar with active colored ring when selected.
+ * - Center-aligned label below with clear bold contrast on selection.
+ */
+@Composable
+fun HotelCategoryCircleTab(
+    title: String,
+    imageUrl: String?,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isAllOption: Boolean = false,
+    testTag: String = ""
+) {
+    val activeColor = NaturalPrimary
+    val ringColor = if (isSelected) activeColor else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    val ringWidth = if (isSelected) 2.5.dp else 1.dp
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .testTag(testTag)
+            .clickable(onClick = onClick)
+            .padding(vertical = 2.dp)
+            .widthIn(min = 64.dp, max = 76.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(62.dp)
+                .border(
+                    BorderStroke(ringWidth, ringColor),
+                    shape = CircleShape
+                )
+                .padding(if (isSelected) 2.5.dp else 0.dp)
+                .clip(CircleShape)
+                .background(
+                    if (isAllOption && isSelected) activeColor.copy(alpha = 0.14f)
+                    else if (isAllOption) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (isAllOption) {
+                Icon(
+                    imageVector = Icons.Outlined.RestaurantMenu,
+                    contentDescription = "All items",
+                    tint = if (isSelected) activeColor else TextSecondary,
+                    modifier = Modifier.size(26.dp)
+                )
+            } else if (!imageUrl.isNullOrBlank()) {
+                ProductImage(
+                    url = imageUrl,
+                    contentDescription = title,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Outlined.Fastfood,
+                    contentDescription = title,
+                    tint = if (isSelected) activeColor else TextSecondary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+            color = if (isSelected) activeColor else TextSecondary,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            lineHeight = 14.sp
+        )
     }
 }
 

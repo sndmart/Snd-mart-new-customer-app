@@ -22,9 +22,11 @@ class SndmartApp : Application() {
 
     private fun initFirebaseSafety() {
         try {
-            com.google.firebase.messaging.FirebaseMessaging.getInstance().isAutoInitEnabled = true
+            // Keep FCM auto-init disabled by default so the background SyncTask does not run
+            // on startup in environments without active FCM registration or Play account.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().isAutoInitEnabled = false
         } catch (e: Throwable) {
-            // FirebaseApp not present or not initialized
+            // FirebaseApp or Play Services not present/initialized
         }
     }
 

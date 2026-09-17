@@ -10,6 +10,7 @@ import com.example.data.session.UserSessionManager
 import com.example.util.VersionUtils
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
@@ -76,14 +77,14 @@ class StartupChecksUnitTest {
         return Proxy.newProxyInstance(
             SupabaseApi::class.java.classLoader,
             arrayOf(SupabaseApi::class.java)
-        ) { _, method, args ->
+        ) { _, method, _ ->
             when (method.name) {
                 "getAppVersionInfo" -> {
-                    Response.success(versionResponse ?: emptyList())
+                    Response.success<List<AppVersionInfo>>(versionResponse ?: emptyList())
                 }
                 "getAppSetting" -> {
                     val bodyStr = maintenanceResponseBody ?: """[{"value": {"enabled": false}}]"""
-                    Response.success(bodyStr.toResponseBody("application/json".toMediaTypeOrNull()))
+                    Response.success<ResponseBody>(bodyStr.toResponseBody("application/json".toMediaTypeOrNull()))
                 }
                 else -> {
                     throw UnsupportedOperationException("Mock not implemented for ${method.name}")

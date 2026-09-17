@@ -1,7 +1,8 @@
 package com.example.ui.screens
 
 import android.util.Log
-import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,10 +17,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -53,13 +56,19 @@ fun HomeScreen(
     onNavigateToCart: () -> Unit,
     onNavigateToHotelMenu: (vendorId: String, vendorName: String) -> Unit,
     onOpenSettings: () -> Unit,
-    onNavigateToNotifications: (() -> Unit)? = null
+    onNavigateToNotifications: (() -> Unit)? = null,
+    onProceedToCheckout: (isHotel: Boolean) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     val unreadNotificationCount by repository.sessionManager.unreadNotificationCount.collectAsState()
 
-    var browsingMode by remember { mutableStateOf(BrowsingMode.GROCERY) }
+    var browsingMode by rememberSaveable { mutableStateOf(BrowsingMode.GROCERY) }
     var searchQuery by remember { mutableStateOf("") }
+
+    // Intercept back navigation when on the Hotels tab to return to the Home screen (Grocery view)
+    BackHandler(enabled = browsingMode == BrowsingMode.HOTELS) {
+        browsingMode = BrowsingMode.GROCERY
+    }
 
     val GROCERY_PAGE_SIZE = 30
     val HOTEL_PAGE_SIZE = 20
@@ -74,8 +83,10 @@ fun HomeScreen(
     var groceryError by remember { mutableStateOf<String?>(null) }
 
     // Hotels data
-    var hotels by remember { mutableStateOf<List<Vendor>>(emptyList()) }
-    var isHotelsLoading by remember { mutableStateOf(true) }
+    var hotels by remember {
+        mutableStateOf(repository.getCachedHotels(selectedCity?.id) ?: emptyList())
+    }
+    var isHotelsLoading by remember { mutableStateOf(hotels.isEmpty()) }
     var isLoadingMoreHotels by remember { mutableStateOf(false) }
     var hasMoreHotels by remember { mutableStateOf(true) }
     var hotelsError by remember { mutableStateOf<String?>(null) }
@@ -85,8 +96,62 @@ fun HomeScreen(
     val hotelCart by repository.hotelCart.collectAsState()
     val totalCartCount = repository.getCartCount()
 
+    // Fresh cart pricing for floating cart button
+    var freshGroceryItems by remember { mutableStateOf<List<CartItemUi>>(emptyList()) }
+    LaunchedEffect(groceryCart, selectedCity?.id) {
+        val cid = selectedCity?.id
+        if (cid != null && groceryCart.isNotEmpty()) {
+            val res = repository.getFreshCartItems(isHotel = false, cityId = cid)
+            if (res.isSuccess) {
+                freshGroceryItems = res.getOrNull() ?: emptyList()
+            }
+        } else {
+            freshGroceryItems = emptyList()
+        }
+    }
+
+    var freshHotelItems by remember { mutableStateOf<List<CartItemUi>>(emptyList()) }
+    LaunchedEffect(hotelCart, selectedCity?.id) {
+        val cid = selectedCity?.id
+        if (cid != null && hotelCart.isNotEmpty()) {
+            val res = repository.getFreshCartItems(isHotel = true, cityId = cid)
+            if (res.isSuccess) {
+                freshHotelItems = res.getOrNull() ?: emptyList()
+            }
+        } else {
+            freshHotelItems = emptyList()
+        }
+    }
+
+    val groceryCartCount = groceryCart.sumOf { it.quantity }
+    val groceryCartTotal = remember(groceryCart, freshGroceryItems, groceryProducts) {
+        if (freshGroceryItems.isNotEmpty()) {
+            freshGroceryItems.sumOf { it.totalPrice }
+        } else {
+            groceryCart.sumOf { item ->
+                val p = groceryProducts.find { it.id == item.productId }
+                val v = p?.variants?.find { it.id == item.variantId }
+                (v?.price ?: p?.effectivePrice ?: 0.0) * item.quantity
+            }
+        }
+    }
+
+    val hotelCartCount = hotelCart.sumOf { it.quantity }
+    val hotelCartTotal = remember(hotelCart, freshHotelItems) {
+        if (freshHotelItems.isNotEmpty()) {
+            freshHotelItems.sumOf { it.totalPrice }
+        } else {
+            0.0
+        }
+    }
+
+    val activeCartCount = if (browsingMode == BrowsingMode.GROCERY) groceryCartCount else hotelCartCount
+    val activeCartTotal = if (browsingMode == BrowsingMode.GROCERY) groceryCartTotal else hotelCartTotal
+    val activeIsHotel = browsingMode == BrowsingMode.HOTELS
+
     // Conflict Dialog state
     var pendingHotelConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
+    var variantPickerProduct by remember { mutableStateOf<ResolvedProduct?>(null) }
 
     // Snackbar host
     val snackbarHostState = remember { SnackbarHostState() }
@@ -98,8 +163,17 @@ fun HomeScreen(
             val catRes = repository.getGroceryCategories()
             if (catRes.isSuccess) {
                 val list = catRes.getOrNull() ?: emptyList()
-                categories = list
-                Log.d("HomeScreen", "Loaded ${list.size} categories: ${list.map { it.name }}")
+                val filtered = list.filter { c ->
+                    val n = c.name.lowercase()
+                    n.contains("veg") || n.contains("fruit")
+                }.ifEmpty { list }
+                categories = filtered
+                val vegCategory = filtered.firstOrNull { it.name.lowercase().contains("veg") }
+                    ?: filtered.firstOrNull()
+                if (vegCategory != null && (selectedCategoryId == null || filtered.none { it.id == selectedCategoryId })) {
+                    selectedCategoryId = vegCategory.id
+                }
+                Log.d("HomeScreen", "Loaded ${filtered.size} categories: ${filtered.map { it.name }}")
             } else {
                 val error = catRes.exceptionOrNull()
                 Log.e("HomeScreen", "Categories fetch error: ${error?.message}", error)
@@ -112,9 +186,19 @@ fun HomeScreen(
     }
 
     // Grocery products depend on city + selected category + search query.
+    // Product grid query is always scoped to selectedCategoryId (Vegitables by default), never unfiltered "All".
     // Rule 1: Paginate by 30 at a time.
     fun loadGroceryProducts(cityId: String, query: String, categoryId: String? = selectedCategoryId, reset: Boolean = true) {
         coroutineScope.launch {
+            val effectiveCatId = categoryId
+                ?: selectedCategoryId
+                ?: categories.firstOrNull { it.name.lowercase().contains("veg") }?.id
+                ?: categories.firstOrNull()?.id
+            if (effectiveCatId == null) {
+                // Category not resolved yet; do not execute unfiltered "All" query
+                return@launch
+            }
+
             if (reset) {
                 isGroceryLoading = true
                 groceryError = null
@@ -125,7 +209,7 @@ fun HomeScreen(
             val offset = if (reset) 0 else groceryProducts.size
             val prodRes = repository.getResolvedGroceryProducts(
                 cityId = cityId,
-                categoryId = categoryId,
+                categoryId = effectiveCatId,
                 searchQuery = query.ifBlank { null },
                 limit = GROCERY_PAGE_SIZE,
                 offset = offset
@@ -214,7 +298,10 @@ fun HomeScreen(
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 val cityId = selectedCity?.id
                 if (cityId != null) {
-                    loadGroceryProducts(cityId, searchQuery)
+                    val catId = selectedCategoryId
+                    if (catId != null) {
+                        loadGroceryProducts(cityId, searchQuery, catId)
+                    }
                     loadHotelsData(cityId, searchQuery)
                 }
             }
@@ -228,6 +315,17 @@ fun HomeScreen(
     // Initial category load
     LaunchedEffect(Unit) {
         loadGroceryCategories()
+    }
+
+    // On categories load, default-select "Vegitables" (never "All")
+    LaunchedEffect(categories) {
+        if (categories.isNotEmpty()) {
+            val vegCategory = categories.firstOrNull { it.name.lowercase().contains("veg") }
+                ?: categories.firstOrNull()
+            if (vegCategory != null && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
+                selectedCategoryId = vegCategory.id
+            }
+        }
     }
 
     // Categories + hotels reload when the city changes.
@@ -246,16 +344,19 @@ fun HomeScreen(
     }
 
     // Products reload immediately on city or category change.
+    // Always scoped to selectedCategoryId (Vegitables by default), never "show everything".
     LaunchedEffect(selectedCity?.id, selectedCategoryId) {
         val cityId = selectedCity?.id ?: return@LaunchedEffect
-        loadGroceryProducts(cityId, searchQuery, selectedCategoryId)
+        val catId = selectedCategoryId ?: return@LaunchedEffect
+        loadGroceryProducts(cityId, searchQuery, catId)
     }
 
     // Products reload on search query change (debounced so typing doesn't spam backend).
     LaunchedEffect(searchQuery) {
         val cityId = selectedCity?.id ?: return@LaunchedEffect
+        val catId = selectedCategoryId ?: return@LaunchedEffect
         delay(300)
-        loadGroceryProducts(cityId, searchQuery, selectedCategoryId)
+        loadGroceryProducts(cityId, searchQuery, catId)
     }
 
     // Handle single-hotel rule conflict dialog
@@ -289,6 +390,25 @@ fun HomeScreen(
         )
     }
 
+    // Grocery Product Variant Picker Bottom Sheet
+    variantPickerProduct?.let { prod ->
+        GroceryVariantPickerSheet(
+            product = prod,
+            groceryCart = groceryCart,
+            onAddToCart = { variantId, delta ->
+                repository.addToCart(
+                    productId = prod.id,
+                    vendorId = null,
+                    cityId = selectedCity?.id,
+                    quantityDelta = delta,
+                    isHotel = false,
+                    variantId = variantId
+                )
+            },
+            onDismiss = { variantPickerProduct = null }
+        )
+    }
+
     Scaffold(
         topBar = {
             SndmartTopBar(
@@ -296,13 +416,40 @@ fun HomeScreen(
                 cartCount = totalCartCount,
                 deliveryAddressLabel = deliveryAddressLabel,
                 unreadNotificationCount = unreadNotificationCount,
+                navigationIcon = if (browsingMode == BrowsingMode.HOTELS) {
+                    {
+                        IconButton(
+                            onClick = { browsingMode = BrowsingMode.GROCERY },
+                            modifier = Modifier.testTag("hotels_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to Groceries"
+                            )
+                        }
+                    }
+                } else null,
                 onCityClick = onCityChangeRequested,
                 onCartClick = onNavigateToCart,
                 onNotificationsClick = onNavigateToNotifications,
                 onSettingsClick = onOpenSettings
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            AnimatedVisibility(
+                visible = activeCartCount > 0,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut()
+            ) {
+                FloatingCartButton(
+                    itemCount = activeCartCount,
+                    totalPrice = activeCartTotal,
+                    onClick = { onProceedToCheckout(activeIsHotel) },
+                    testTag = if (activeIsHotel) "hotel_floating_checkout_button" else "grocery_floating_checkout_button"
+                )
+            }
+        }
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -492,12 +639,12 @@ fun HomeScreen(
                             }
                         } else {
                             items(filteredProducts, key = { it.id }) { product ->
-                                val inCartItem = groceryCart.find { it.productId == product.id }
-                                val quantityInCart = inCartItem?.quantity ?: 0
+                                val inCartItems = groceryCart.filter { it.productId == product.id }
+                                val totalQuantityInCart = inCartItems.sumOf { it.quantity }
 
                                 GroceryProductCard(
                                     product = product,
-                                    quantityInCart = quantityInCart,
+                                    quantityInCart = totalQuantityInCart,
                                     onIncrease = {
                                         repository.addToCart(
                                             productId = product.id,
@@ -515,6 +662,9 @@ fun HomeScreen(
                                             quantityDelta = -1,
                                             isHotel = false
                                         )
+                                    },
+                                    onSelectSize = {
+                                        variantPickerProduct = product
                                     }
                                 )
                             }
@@ -712,7 +862,8 @@ fun GroceryProductCard(
     product: ResolvedProduct,
     quantityInCart: Int,
     onIncrease: () -> Unit,
-    onDecrease: () -> Unit
+    onDecrease: () -> Unit,
+    onSelectSize: () -> Unit = {}
 ) {
     val isInStockAndActive = product.isInStockAndActive
 
@@ -796,25 +947,60 @@ fun GroceryProductCard(
                 color = if (isInStockAndActive) TextPrimary else TextMuted
             )
 
-            PriceDisplay(
-                price = product.effectivePrice,
-                mrp = product.effectiveMrp,
-                unit = product.unit,
-                modifier = Modifier
-                    .padding(vertical = 4.dp)
-                    .alpha(if (isInStockAndActive) 1f else 0.7f)
-            )
+            if (product.hasVariants) {
+                val startingPrice = product.startingPrice ?: product.effectivePrice
+                Text(
+                    text = "Starting from ₹${"%.0f".format(startingPrice)}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = PriceGreen,
+                    modifier = Modifier
+                        .padding(vertical = 4.dp)
+                        .alpha(if (isInStockAndActive) 1f else 0.7f)
+                )
+            } else {
+                PriceDisplay(
+                    price = product.effectivePrice,
+                    mrp = product.effectiveMrp,
+                    unit = product.unit,
+                    modifier = Modifier
+                        .padding(vertical = 4.dp)
+                        .alpha(if (isInStockAndActive) 1f else 0.7f)
+                )
+            }
 
             Spacer(modifier = Modifier.height(4.dp))
 
             if (isInStockAndActive) {
-                QuantityStepper(
-                    quantity = quantityInCart,
-                    onIncrease = onIncrease,
-                    onDecrease = onDecrease,
-                    modifier = Modifier.fillMaxWidth(),
-                    testTagPrefix = "grocery_${product.id}"
-                )
+                if (product.hasVariants) {
+                    Button(
+                        onClick = onSelectSize,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp)
+                            .testTag("select_size_${product.id}"),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (quantityInCart > 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.primary,
+                            contentColor = if (quantityInCart > 0) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            text = if (quantityInCart > 0) "Select Size ($quantityInCart)" else "Select Size",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    QuantityStepper(
+                        quantity = quantityInCart,
+                        onIncrease = onIncrease,
+                        onDecrease = onDecrease,
+                        modifier = Modifier.fillMaxWidth(),
+                        testTagPrefix = "grocery_${product.id}"
+                    )
+                }
             } else {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
@@ -833,6 +1019,154 @@ fun GroceryProductCard(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GroceryVariantPickerSheet(
+    product: ResolvedProduct,
+    groceryCart: List<CartItem>,
+    onAddToCart: (variantId: String, delta: Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+        modifier = Modifier.testTag("variant_picker_sheet")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(54.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                ) {
+                    ProductImage(
+                        url = product.imageUrl,
+                        contentDescription = product.name,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = product.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Select quantity / size",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            val sortedVariants = remember(product) {
+                product.variants.sortedBy { it.price }
+            }
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                sortedVariants.forEach { variant ->
+                    val inCart = groceryCart.find { it.productId == product.id && it.variantId == variant.id }
+                    val qtyInCart = inCart?.quantity ?: 0
+                    val isVariantInStock = variant.isInStock
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (isVariantInStock) 0.35f else 0.15f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (qtyInCart > 0) NaturalPrimary.copy(alpha = 0.8f)
+                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("variant_row_${variant.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = variant.label,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isVariantInStock) TextPrimary else TextMuted
+                                )
+                                Text(
+                                    text = "₹${"%.0f".format(variant.price)}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isVariantInStock) PriceGreen else TextMuted
+                                )
+                            }
+
+                            if (!isVariantInStock) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Text(
+                                        text = "Out of Stock",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextMuted,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            } else {
+                                QuantityStepper(
+                                    quantity = qtyInCart,
+                                    onIncrease = { onAddToCart(variant.id, 1) },
+                                    onDecrease = { onAddToCart(variant.id, -1) },
+                                    testTagPrefix = "variant_${variant.id}"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("close_variant_picker_button"),
+                shape = RoundedCornerShape(24.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary)
+            ) {
+                Text(
+                    text = "Done",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
             }
         }
     }

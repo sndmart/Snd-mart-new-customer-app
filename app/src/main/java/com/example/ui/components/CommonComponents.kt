@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -34,6 +35,7 @@ fun SndmartTopBar(
     cartCount: Int,
     deliveryAddressLabel: String? = null,
     unreadNotificationCount: Int = 0,
+    navigationIcon: (@Composable () -> Unit)? = null,
     onCityClick: () -> Unit,
     onCartClick: () -> Unit,
     onNotificationsClick: (() -> Unit)? = null,
@@ -49,6 +51,9 @@ fun SndmartTopBar(
     }
 
     TopAppBar(
+        navigationIcon = {
+            navigationIcon?.invoke()
+        },
         title = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -518,6 +523,67 @@ fun BillRow(
             fontWeight = if (isBold) FontWeight.Bold else FontWeight.SemiBold,
             color = color
         )
+    }
+}
+
+/**
+ * Pinned floating cart bar displayed near the bottom of browsing screens
+ * (Home screen grocery grid, hotel menu) when items exist in the active cart.
+ * Shows item count and total price on the left, and a direct "Checkout →" action on the right.
+ */
+@Composable
+fun FloatingCartButton(
+    itemCount: Int,
+    totalPrice: Double,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    testTag: String = "floating_cart_button"
+) {
+    if (itemCount <= 0) return
+
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(28.dp),
+        color = NaturalPrimary,
+        contentColor = Color.White,
+        shadowElevation = 8.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .height(54.dp)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "$itemCount item${if (itemCount > 1) "s" else ""} • ₹${"%.0f".format(totalPrice)}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Checkout",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Proceed to Checkout",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
     }
 }
 

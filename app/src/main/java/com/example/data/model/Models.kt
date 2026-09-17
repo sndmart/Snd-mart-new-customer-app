@@ -57,6 +57,25 @@ data class Vendor(
     @Json(name = "opening_time") val openingTime: String? = null,
     @Json(name = "closing_time") val closingTime: String? = null,
     @Json(name = "is_featured") val isFeatured: Boolean? = false
+) {
+    // Compatibility alias: wherever imageUrl is referenced for a vendor/hotel, resolve to bannerUrl
+    val imageUrl: String? get() = bannerUrl
+}
+
+@JsonClass(generateAdapter = true)
+data class ProductVariantCityStock(
+    val price: Double = 0.0,
+    @Json(name = "stock_qty") val stockQty: Int? = 0,
+    @Json(name = "is_available") val isAvailable: Boolean = true,
+    @Json(name = "city_id") val cityId: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ProductVariant(
+    val id: String = "",
+    val label: String = "",
+    @Json(name = "is_active") val isActive: Boolean = true,
+    @Json(name = "product_variant_city_stock") val cityStock: List<ProductVariantCityStock>? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -74,7 +93,8 @@ data class Product(
     @Json(name = "stock_quantity") val stockQuantity: Int? = null,
     @Json(name = "is_available") val isAvailable: Boolean = true,
     @Json(name = "is_active") val isActive: Boolean = true,
-    @Json(name = "is_featured") val isFeatured: Boolean? = false
+    @Json(name = "is_featured") val isFeatured: Boolean? = false,
+    @Json(name = "product_variants") val productVariants: List<ProductVariant>? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -87,13 +107,25 @@ data class ProductCityStock(
     @Json(name = "is_available") val isAvailable: Boolean = true
 )
 
-// UI Model: Product resolved with fresh city price & stock override
+// UI Model: Individual resolved variant for the selected city
+data class ResolvedVariant(
+    val id: String,
+    val label: String,
+    val price: Double,
+    val stockQty: Int,
+    val isAvailable: Boolean
+) {
+    val isInStock: Boolean get() = isAvailable && stockQty > 0
+}
+
+// UI Model: Product resolved with fresh city price & stock override and optional variants
 data class ResolvedProduct(
     val baseProduct: Product,
     val effectivePrice: Double,
     val effectiveMrp: Double?,
     val effectiveStock: Int,
-    val effectiveIsAvailable: Boolean
+    val effectiveIsAvailable: Boolean,
+    val variants: List<ResolvedVariant> = emptyList()
 ) {
     val id: String get() = baseProduct.id
     val name: String get() = baseProduct.name
@@ -104,8 +136,16 @@ data class ResolvedProduct(
     val categoryId: String? get() = baseProduct.categoryId
     val isFeatured: Boolean get() = baseProduct.isFeatured == true
     val isActive: Boolean get() = baseProduct.isActive
+    val hasVariants: Boolean get() = variants.isNotEmpty()
+    val startingPrice: Double? get() = if (hasVariants) variants.minOfOrNull { it.price } else null
+
     val isInStockAndActive: Boolean
-        get() = baseProduct.isActive && effectiveIsAvailable && effectiveStock > 0
+        get() = if (hasVariants) {
+            baseProduct.isActive && variants.any { it.isInStock }
+        } else {
+            baseProduct.isActive && effectiveIsAvailable && effectiveStock > 0
+        }
+
     val isHotelItemAvailable: Boolean
         get() = baseProduct.isActive && effectiveIsAvailable && (effectiveStock > 0 || baseProduct.stockQty == null)
 }
@@ -121,12 +161,20 @@ data class CartItem(
     val quantity: Int = 1
 )
 
-// UI Model for Cart item with freshly fetched product data
+// UI Model for Cart item with freshly fetched product data and variant resolution
 data class CartItemUi(
     val cartItem: CartItem,
-    val product: ResolvedProduct
+    val product: ResolvedProduct,
+    val variant: ResolvedVariant? = null
 ) {
-    val totalPrice: Double get() = product.effectivePrice * cartItem.quantity
+    val effectivePrice: Double get() = variant?.price ?: product.effectivePrice
+    val totalPrice: Double get() = effectivePrice * cartItem.quantity
+    val displayName: String
+        get() = if (variant != null && variant.label.isNotBlank()) {
+            "${product.name} - ${variant.label}"
+        } else {
+            product.name
+        }
 }
 
 @JsonClass(generateAdapter = true)
@@ -398,7 +446,8 @@ data class DeviceToken(
     @Json(name = "user_id") val userId: String = "",
     @Json(name = "user_type") val userType: String = "customer",
     @Json(name = "fcm_token") val fcmToken: String = "",
-    val active: Boolean = true
+    val active: Boolean = true,
+    @Json(name = "firebase_project") val firebaseProject: String = "native"
 )
 
 @JsonClass(generateAdapter = true)
@@ -475,4 +524,38 @@ sealed class StartupCheckResult {
     data class BlockingUpdate(val updateMessage: String?, val updateUrl: String? = null) : StartupCheckResult()
     data class Maintenance(val message: String) : StartupCheckResult()
 }
+
+// Razorpay Models
+@JsonClass(generateAdapter = true)
+data class CreateRazorpayOrderRequest(
+    @Json(name = "order_id") val orderId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class RazorpayOrderResponse(
+    @Json(name = "key_id") val keyId: String = "",
+    @Json(name = "amount") val amount: Double = 0.0,
+    @Json(name = "currency") val currency: String = "INR",
+    @Json(name = "razorpay_order_id") val razorpayOrderId: String = "",
+    @Json(name = "error") val error: String? = null,
+    @Json(name = "message") val message: String? = null
+) {
+    val amountInPaise: Long
+        get() = amount.toLong()
+}
+
+@JsonClass(generateAdapter = true)
+data class VerifyRazorpayPaymentRequest(
+    @Json(name = "order_id") val orderId: String,
+    @Json(name = "razorpay_order_id") val razorpayOrderId: String,
+    @Json(name = "razorpay_payment_id") val razorpayPaymentId: String,
+    @Json(name = "razorpay_signature") val razorpaySignature: String
+)
+
+@JsonClass(generateAdapter = true)
+data class VerifyRazorpayPaymentResponse(
+    @Json(name = "success") val success: Boolean = false,
+    @Json(name = "message") val message: String? = null,
+    @Json(name = "error") val error: String? = null
+)
 

@@ -42,6 +42,12 @@ object SupabaseClient {
 
     private val refreshLock = Any()
 
+    fun init(url: String = SupabaseConfig.BASE_URL, anonKey: String? = null) {
+        if (!anonKey.isNullOrBlank()) {
+            customAnonKey = anonKey
+        }
+    }
+
     fun isKeyConfigured(): Boolean {
         val key = getEffectiveAnonKey()
         return key.isNotBlank() &&

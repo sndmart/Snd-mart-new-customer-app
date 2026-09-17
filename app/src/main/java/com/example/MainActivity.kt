@@ -35,6 +35,7 @@ import androidx.navigation.navArgument
 import com.example.data.location.LocationDetector
 import com.example.data.model.*
 import com.example.data.repository.SndmartRepository
+import com.example.service.CustomerFcmService
 import com.example.service.InAppNotification
 import com.example.service.SndmartMessagingService
 import com.example.ui.components.InAppNotificationBanner
@@ -49,6 +50,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import com.razorpay.PaymentData
+import com.razorpay.PaymentResultWithDataListener
+import com.example.util.RazorpayPaymentManager
 
 sealed class Screen(val route: String, val title: String) {
     object Home : Screen("home", "Home")
@@ -56,7 +60,10 @@ sealed class Screen(val route: String, val title: String) {
     object Orders : Screen("orders", "Orders")
     object Profile : Screen("profile", "Profile")
     object HotelMenu : Screen("hotel_menu/{vendorId}/{vendorName}", "Menu") {
-        fun createRoute(vendorId: String, vendorName: String) = "hotel_menu/$vendorId/$vendorName"
+        fun createRoute(vendorId: String, vendorName: String): String {
+            val encodedName = java.net.URLEncoder.encode(vendorName.ifBlank { "Hotel" }, "UTF-8").replace("+", "%20")
+            return "hotel_menu/$vendorId/$encodedName"
+        }
     }
     object Checkout : Screen("checkout/{isHotel}/{couponCode}/{slotId}", "Checkout") {
         fun createRoute(isHotel: Boolean, couponCode: String?, slotId: String?) =
@@ -77,7 +84,7 @@ sealed class Screen(val route: String, val title: String) {
     object Notifications : Screen("notifications", "Notifications")
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
 
     private val pendingOrderId = mutableStateOf<String?>(null)
 
@@ -330,17 +337,24 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(userId) {
                     val currentUserId = userId ?: return@LaunchedEffect
                     try {
-                        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                            .addOnCompleteListener { task ->
-                                if (task.isSuccessful && task.result != null) {
-                                    val token = task.result
-                                    coroutineScope.launch {
-                                        repository.registerDeviceToken(currentUserId, token)
+                        val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+                        val playServicesOk = availability.isGooglePlayServicesAvailable(this@MainActivity) ==
+                            com.google.android.gms.common.ConnectionResult.SUCCESS
+                        if (playServicesOk) {
+                            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                                .addOnCompleteListener { task ->
+                                    if (task.isSuccessful && task.result != null) {
+                                        val token = task.result
+                                        coroutineScope.launch {
+                                            repository.registerCustomerFcmToken(token)
+                                        }
+                                    } else {
+                                        android.util.Log.d("MainActivity", "FCM token not available: ${task.exception?.message}")
                                     }
                                 }
-                            }
+                        }
                     } catch (e: Throwable) {
-                        // Firebase not available in headless test environment; skip silently
+                        // Firebase/Play Services not available; skip silently
                     }
                     // Fetch latest unread notifications count
                     repository.refreshUnreadNotificationCount(currentUserId)
@@ -414,7 +428,7 @@ class MainActivity : ComponentActivity() {
 
                 // Collect in-app push messages
                 LaunchedEffect(Unit) {
-                    SndmartMessagingService.inAppEvents.collectLatest { notification ->
+                    CustomerFcmService.inAppEvents.collectLatest { notification ->
                         activeNotification = notification
                     }
                 }
@@ -626,7 +640,10 @@ class MainActivity : ComponentActivity() {
                                         navController.navigate(Screen.HotelMenu.createRoute(vendorId, vendorName))
                                     },
                                     onOpenSettings = { showSupabaseSettings = true },
-                                    onNavigateToNotifications = { navController.navigate(Screen.Notifications.route) }
+                                    onNavigateToNotifications = { navController.navigate(Screen.Notifications.route) },
+                                    onProceedToCheckout = { isHotel ->
+                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null, null))
+                                    }
                                 )
                             }
 
@@ -650,14 +667,22 @@ class MainActivity : ComponentActivity() {
                                 )
                             ) { backStackEntry ->
                                 val vendorId = backStackEntry.arguments?.getString("vendorId") ?: ""
-                                val vendorName = backStackEntry.arguments?.getString("vendorName") ?: "Hotel"
+                                val rawVendorName = backStackEntry.arguments?.getString("vendorName") ?: "Hotel"
+                                val vendorName = try {
+                                    java.net.URLDecoder.decode(rawVendorName, "UTF-8")
+                                } catch (e: Exception) {
+                                    rawVendorName
+                                }
                                 HotelMenuScreen(
                                     vendorId = vendorId,
                                     vendorName = vendorName,
                                     cityId = selectedCity?.id ?: "",
                                     repository = repository,
                                     onBack = { navController.popBackStack() },
-                                    onNavigateToCart = { navController.navigate(Screen.Cart.route) }
+                                    onNavigateToCart = { navController.navigate(Screen.Cart.route) },
+                                    onProceedToCheckout = { isHotel ->
+                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null, null))
+                                    }
                                 )
                             }
 
@@ -954,8 +979,10 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
         val orderIdFromExtra = intent.getStringExtra("order_id")
+            ?: intent.getStringExtra("orderId")
             ?: intent.getStringExtra("id")
             ?: intent.extras?.getString("order_id")
+            ?: intent.extras?.getString("orderId")
             ?: intent.extras?.getString("id")
         if (!orderIdFromExtra.isNullOrBlank()) {
             pendingOrderId.value = orderIdFromExtra
@@ -968,5 +995,13 @@ class MainActivity : ComponentActivity() {
                 pendingOrderId.value = orderId
             }
         }
+    }
+
+    override fun onPaymentSuccess(razorpayPaymentId: String?, paymentData: PaymentData?) {
+        RazorpayPaymentManager.onPaymentSuccess(razorpayPaymentId, paymentData)
+    }
+
+    override fun onPaymentError(code: Int, response: String?, paymentData: PaymentData?) {
+        RazorpayPaymentManager.onPaymentError(code, response, paymentData)
     }
 }

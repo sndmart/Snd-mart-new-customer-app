@@ -22,21 +22,34 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.Category
+import androidx.compose.runtime.remember
 import com.example.ui.theme.*
 
 /**
  * Horizontal scroll of grocery category image cards (image_url + name).
- * Tapping a card selects it (and re-tapping clears to "All"). The leading
- * "All" card clears any category filter so the user can browse every grocery
- * product in their city.
+ * Only "Vegitables" and "Fruits" categories are displayed (no "All" tab).
+ * Tapping a card selects that category.
  */
 @Composable
 fun GroceryCategoryList(
     categories: List<Category>,
     selectedCategoryId: String?,
-    onCategorySelected: (String?) -> Unit,
+    onCategorySelected: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Only "Vegitables" and "Fruits" categories remain, with Vegetables first
+    val displayCategories = remember(categories) {
+        val filtered = categories.filter { c ->
+            val n = c.name.lowercase()
+            n.contains("veg") || n.contains("fruit")
+        }
+        if (filtered.isNotEmpty()) {
+            filtered.sortedBy { if (it.name.lowercase().contains("veg")) 0 else 1 }
+        } else {
+            categories
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -56,26 +69,14 @@ fun GroceryCategoryList(
                 .fillMaxWidth()
                 .testTag("grocery_category_list")
         ) {
-            item {
-                GroceryCategoryCard(
-                    name = "All",
-                    imageUrl = null,
-                    isSelected = selectedCategoryId == null,
-                    fallbackIcon = Icons.Outlined.Storefront,
-                    onClick = { onCategorySelected(null) },
-                    testTag = "category_item_all"
-                )
-            }
-            items(categories, key = { it.id }) { category ->
+            items(displayCategories, key = { it.id }) { category ->
                 GroceryCategoryCard(
                     name = category.name,
                     imageUrl = category.imageUrl,
                     isSelected = selectedCategoryId == category.id,
                     fallbackIcon = Icons.Outlined.Storefront,
                     onClick = {
-                        onCategorySelected(
-                            if (selectedCategoryId == category.id) null else category.id
-                        )
+                        onCategorySelected(category.id)
                     },
                     testTag = "category_item_${category.id}"
                 )

@@ -115,15 +115,20 @@ fun AuthScreen(
     // Helper: Register FCM Token upon successful authentication
     fun registerFcm(userId: String) {
         try {
-            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                if (task.isSuccessful && task.result != null) {
-                    val token = task.result
-                    Log.d("AuthScreen", "Retrieved FCM token on login: $token")
-                    coroutineScope.launch {
-                        try {
-                            repository.registerDeviceToken(userId, token)
-                        } catch (e: Exception) {
-                            Log.w("AuthScreen", "Failed to register FCM token: ${e.message}")
+            val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+            val playServicesOk = availability.isGooglePlayServicesAvailable(context) ==
+                com.google.android.gms.common.ConnectionResult.SUCCESS
+            if (playServicesOk) {
+                FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                    if (task.isSuccessful && task.result != null) {
+                        val token = task.result
+                        Log.d("AuthScreen", "Retrieved FCM token on login: $token")
+                        coroutineScope.launch {
+                            try {
+                                repository.registerCustomerFcmToken(token)
+                            } catch (e: Exception) {
+                                Log.w("AuthScreen", "Failed to register FCM token: ${e.message}")
+                            }
                         }
                     }
                 }

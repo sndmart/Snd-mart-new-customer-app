@@ -66,12 +66,19 @@ class SndmartRepository(
     private var cachedGroceryCategories: List<Category>? = null
     private val cachedProfiles = java.util.concurrent.ConcurrentHashMap<String, Profile>()
     private val cachedVendorNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val cachedHotelsByCity = java.util.concurrent.ConcurrentHashMap<String, List<Vendor>>()
+
+    fun getCachedHotels(cityId: String?): List<Vendor>? {
+        if (cityId.isNullOrBlank()) return null
+        return cachedHotelsByCity[cityId]
+    }
 
     fun clearCaches() {
         cachedCities = null
         cachedGroceryCategories = null
         cachedProfiles.clear()
         cachedVendorNames.clear()
+        cachedHotelsByCity.clear()
     }
 
     // --- SESSION MANAGEMENT ---
@@ -125,13 +132,13 @@ class SndmartRepository(
     }
 
     private fun getFallbackGroceryProducts(categoryId: String?, searchQuery: String? = null): List<ResolvedProduct> {
-        val filtered = when {
-            !searchQuery.isNullOrBlank() ->
-                DemoCatalog.GROCERY_PRODUCTS.filter { it.name.contains(searchQuery, ignoreCase = true) }
-            categoryId.isNullOrBlank() ->
-                DemoCatalog.GROCERY_PRODUCTS
-            else ->
-                DemoCatalog.GROCERY_PRODUCTS.filter { it.categoryId == categoryId }
+        val targetCatId = categoryId
+            ?: demoGroceryCategories.firstOrNull { it.name.contains("veg", ignoreCase = true) }?.id
+            ?: "cat_veg"
+        val filtered = DemoCatalog.GROCERY_PRODUCTS.filter { prod ->
+            val matchesCategory = prod.categoryId == targetCatId
+            val matchesQuery = searchQuery.isNullOrBlank() || prod.name.contains(searchQuery, ignoreCase = true)
+            matchesCategory && matchesQuery
         }
         return filtered.map { prod ->
             ResolvedProduct(
@@ -139,7 +146,8 @@ class SndmartRepository(
                 effectivePrice = prod.price,
                 effectiveMrp = prod.mrp,
                 effectiveStock = prod.stockQty ?: 50,
-                effectiveIsAvailable = prod.isAvailable
+                effectiveIsAvailable = prod.isAvailable,
+                variants = resolveProductVariants(prod, "city_sindhanur")
             )
         }.sortedWith(
             compareByDescending<ResolvedProduct> { it.isInStockAndActive }
@@ -147,13 +155,15 @@ class SndmartRepository(
         )
     }
 
-    // Grocery categories: vendor_type IN (grocery,vegetable,fruit), vendor_id IS NULL,
-    // scoped to the customer's city. Demo fallback ignores city_id (demo cats have none).
+    // Grocery categories: vendor_type IN (grocery,vegetable,fruit), vendor_id IS NULL.
+    // Only "Vegitables" and "Fruits" categories remain, defaulting to Vegetables first.
     private val demoGroceryCategories: List<Category>
         get() = DemoCatalog.CATEGORIES.filter {
             val vt = it.vendorType?.lowercase()
-            vt in listOf("grocery", "vegetable", "fruit") && it.vendorId == null && it.isActive
-        }
+            val n = it.name.lowercase()
+            (n.contains("veg") || n.contains("fruit") || vt in listOf("vegetable", "fruit")) &&
+                !n.contains("dairy") && it.vendorId == null && it.isActive
+        }.sortedBy { if (it.name.lowercase().contains("veg")) 0 else 1 }
 
     private fun getFallbackHotelMenu(vendorId: String): Pair<List<Category>, List<ResolvedProduct>> {
         val cats = DemoCatalog.HOTEL_CATEGORIES.filter { it.vendorId == vendorId }
@@ -187,7 +197,8 @@ class SndmartRepository(
             effectivePrice = p.price,
             effectiveMrp = p.mrp,
             effectiveStock = p.stockQty ?: 50,
-            effectiveIsAvailable = p.isAvailable
+            effectiveIsAvailable = p.isAvailable,
+            variants = resolveProductVariants(p, "city_sindhanur")
         )
     }
 
@@ -613,6 +624,9 @@ class SndmartRepository(
                 DemoCatalog.HOTELS.filter { it.name.contains(searchQuery, ignoreCase = true) }
             else DemoCatalog.HOTELS
             val paged = demo.drop(offset).take(limit)
+            if (searchQuery.isNullOrBlank() && offset == 0) {
+                cachedHotelsByCity[cityId] = paged
+            }
             return Result.success(paged)
         }
         return try {
@@ -622,8 +636,10 @@ class SndmartRepository(
             val response = api.getVendors(
                 cityId = "eq.$cityId",
                 vendorType = "eq.hotel",
+                approvalStatus = "eq.approved",
                 name = nameQuery,
-                select = "id,name,vendor_type,image_url,banner_url,rating,is_open,is_active,is_featured,city_id,opening_time,closing_time",
+                select = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time",
+                order = "is_featured.desc",
                 limit = limit,
                 offset = offset
             )
@@ -637,6 +653,9 @@ class SndmartRepository(
                         }
                     }.thenBy { it.name.lowercase() }
                 )
+                if (searchQuery.isNullOrBlank() && offset == 0) {
+                    cachedHotelsByCity[cityId] = sorted
+                }
                 Result.success(sorted)
             } else {
                 val error = SupabaseClient.parseErrorMessage(response)
@@ -708,7 +727,7 @@ class SndmartRepository(
         val cached = cachedVendorNames[vendorId]
         if (cached != null) return Result.success(cached)
         return try {
-            val response = api.getVendorById(idQuery = "eq.$vendorId")
+            val response = api.getVendorById(idQuery = "eq.$vendorId", select = "id,name")
             val name = response.body()?.firstOrNull()?.name
             if (name != null) {
                 cachedVendorNames[vendorId] = name
@@ -721,11 +740,34 @@ class SndmartRepository(
 
     suspend fun getVendor(vendorId: String): Result<Vendor?> {
         return try {
-            val response = api.getVendorById(idQuery = "eq.$vendorId")
+            val response = api.getVendorById(
+                idQuery = "eq.$vendorId",
+                select = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time"
+            )
             Result.success(response.body()?.firstOrNull())
         } catch (e: Exception) {
             Result.success(null)
         }
+    }
+
+    fun resolveProductVariants(prod: Product, cityId: String): List<ResolvedVariant> {
+        val variants = prod.productVariants?.filter { it.isActive } ?: return emptyList()
+        val list = mutableListOf<ResolvedVariant>()
+        for (v in variants) {
+            val stockRow = v.cityStock?.firstOrNull { it.cityId == cityId || it.cityId.isNullOrBlank() }
+            if (stockRow != null) {
+                list.add(
+                    ResolvedVariant(
+                        id = v.id,
+                        label = v.label,
+                        price = stockRow.price,
+                        stockQty = stockRow.stockQty ?: 0,
+                        isAvailable = stockRow.isAvailable
+                    )
+                )
+            }
+        }
+        return list.sortedBy { it.price }
     }
 
     // --- PRODUCTS & CITY STOCK RESOLUTION ---
@@ -739,25 +781,28 @@ class SndmartRepository(
         limit: Int = 30,
         offset: Int = 0
     ): Result<List<ResolvedProduct>> {
+        val effectiveCatId = categoryId
+            ?: cachedGroceryCategories?.firstOrNull { it.name.contains("veg", ignoreCase = true) }?.id
+            ?: demoGroceryCategories.firstOrNull { it.name.contains("veg", ignoreCase = true) }?.id
+            ?: "cat_veg"
+
         if (!SupabaseClient.isKeyConfigured()) {
-            val demo = getFallbackGroceryProducts(categoryId, searchQuery)
+            val demo = getFallbackGroceryProducts(effectiveCatId, searchQuery)
             val paged = demo.drop(offset).take(limit)
             return Result.success(paged)
         }
         return try {
-            // When searching, look across ALL city groceries (ignore category) using
-            // name=ilike.*query*; otherwise filter by the selected category.
-            val searching = !searchQuery.isNullOrBlank()
-            val catQuery = if (searching) null else categoryId?.let { "eq.$it" }
+            // Product grid query — always scoped to selectedCategoryId, never "show everything"
+            val catQuery = "eq.$effectiveCatId"
             val nameQuery = searchQuery?.takeIf { it.isNotBlank() }?.let {
                 "ilike.*" + java.net.URLEncoder.encode(it.trim(), "UTF-8").replace("+", "%20") + "*"
             }
             val prodResponse = api.getProducts(
-                isActive = null,
+                isActive = "eq.true",
                 categoryId = catQuery,
                 vendorId = "is.null",
                 name = nameQuery,
-                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,product_variants(id,label,is_active,product_variant_city_stock(price,stock_qty,is_available,city_id))",
                 limit = limit,
                 offset = offset
             )
@@ -795,12 +840,14 @@ class SndmartRepository(
                 val mrp = override?.mrp ?: prod.mrp
                 val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
                 val isAvail = override?.isAvailable ?: prod.isAvailable
+                val resVariants = resolveProductVariants(prod, cityId)
                 ResolvedProduct(
                     baseProduct = prod,
                     effectivePrice = price,
                     effectiveMrp = mrp,
                     effectiveStock = stock,
-                    effectiveIsAvailable = isAvail
+                    effectiveIsAvailable = isAvail,
+                    variants = resVariants
                 )
             }.sortedWith(
                 compareByDescending<ResolvedProduct> { it.isInStockAndActive }
@@ -821,13 +868,19 @@ class SndmartRepository(
             // Rule 4: Run independent category and product requests in parallel
             val (categories, products) = kotlinx.coroutines.coroutineScope {
                 val catDeferred = async {
-                    api.getCategories(order = "sort_order.asc")
+                    api.getCategories(
+                        select = "id,name,image_url,vendor_id,is_active,sort_order",
+                        vendorId = "eq.$vendorId",
+                        isActive = "eq.true",
+                        order = "sort_order.asc"
+                    )
                 }
                 val prodDeferred = async {
                     api.getProducts(
-                        isActive = null,
+                        isActive = "eq.true",
                         vendorId = "eq.$vendorId",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured"
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                        order = "is_featured.desc"
                     )
                 }
                 val catResponse = catDeferred.await()
@@ -840,7 +893,7 @@ class SndmartRepository(
                     }
                     throw ApiException(catResponse.code(), error)
                 }
-                val cats = catResponse.body()?.filter { it.vendorId == vendorId } ?: emptyList()
+                val cats = catResponse.body()?.filter { (it.vendorId == null || it.vendorId == vendorId) && it.isActive } ?: emptyList()
 
                 val prodResponse = prodDeferred.await()
                 if (!prodResponse.isSuccessful || prodResponse.body() == null) {
@@ -923,7 +976,7 @@ class SndmartRepository(
                 val prodDeferred = async {
                     api.getProductsByIds(
                         idInQuery = "in.(${productIds.joinToString(",")})",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured"
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,product_variants(id,label,is_active,product_variant_city_stock(price,stock_qty,is_available,city_id))"
                     )
                 }
                 val stockDeferred = async {
@@ -947,6 +1000,7 @@ class SndmartRepository(
             val list = mutableListOf<CartItemUi>()
             for (item in rawCart) {
                 var resolvedProd: ResolvedProduct? = null
+                var resolvedVariant: ResolvedVariant? = null
                 val prod = productsMap[item.productId]
                 if (prod != null) {
                     val override = stockMap[prod.id]
@@ -954,13 +1008,18 @@ class SndmartRepository(
                     val mrp = override?.mrp ?: prod.mrp
                     val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
                     val isAvail = override?.isAvailable ?: prod.isAvailable
+                    val resVariants = resolveProductVariants(prod, cityId)
                     resolvedProd = ResolvedProduct(
                         baseProduct = prod,
                         effectivePrice = price,
                         effectiveMrp = mrp,
                         effectiveStock = stock,
-                        effectiveIsAvailable = isAvail
+                        effectiveIsAvailable = isAvail,
+                        variants = resVariants
                     )
+                    if (!item.variantId.isNullOrBlank()) {
+                        resolvedVariant = resVariants.firstOrNull { it.id == item.variantId }
+                    }
                 }
 
                 if (resolvedProd == null) {
@@ -968,7 +1027,7 @@ class SndmartRepository(
                 }
 
                 if (resolvedProd != null) {
-                    list.add(CartItemUi(cartItem = item, product = resolvedProd))
+                    list.add(CartItemUi(cartItem = item, product = resolvedProd, variant = resolvedVariant))
                 }
             }
             Result.success(list)
@@ -1030,7 +1089,8 @@ class SndmartRepository(
         vendorId: String?,
         cityId: String?,
         quantityDelta: Int = 1,
-        isHotel: Boolean
+        isHotel: Boolean,
+        variantId: String? = null
     ): AddToCartResult {
         val currentUserId = sessionManager.userId.value ?: "guest"
         if (isHotel) {
@@ -1042,20 +1102,21 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = vendorId,
                     cityId = cityId,
                     quantity = quantityDelta
                 )
                 return AddToCartResult.HotelConflict(existingVendor, vendorId, pending)
             }
-            val existing = currentList.find { it.productId == productId }
+            val existing = currentList.find { it.productId == productId && it.variantId == variantId }
             if (existing != null) {
                 val newQty = existing.quantity + quantityDelta
                 if (newQty <= 0) {
-                    _hotelCart.value = currentList.filter { it.productId != productId }
+                    _hotelCart.value = currentList.filter { !(it.productId == productId && it.variantId == variantId) }
                 } else {
                     _hotelCart.value = currentList.map {
-                        if (it.productId == productId) it.copy(quantity = newQty) else it
+                        if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                     }
                 }
             } else if (quantityDelta > 0) {
@@ -1063,6 +1124,7 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = vendorId,
                     cityId = cityId,
                     quantity = quantityDelta
@@ -1071,14 +1133,14 @@ class SndmartRepository(
             }
         } else {
             val currentList = _groceryCart.value
-            val existing = currentList.find { it.productId == productId }
+            val existing = currentList.find { it.productId == productId && it.variantId == variantId }
             if (existing != null) {
                 val newQty = existing.quantity + quantityDelta
                 if (newQty <= 0) {
-                    _groceryCart.value = currentList.filter { it.productId != productId }
+                    _groceryCart.value = currentList.filter { !(it.productId == productId && it.variantId == variantId) }
                 } else {
                     _groceryCart.value = currentList.map {
-                        if (it.productId == productId) it.copy(quantity = newQty) else it
+                        if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                     }
                 }
             } else if (quantityDelta > 0) {
@@ -1086,6 +1148,7 @@ class SndmartRepository(
                     id = UUID.randomUUID().toString(),
                     userId = currentUserId,
                     productId = productId,
+                    variantId = variantId,
                     vendorId = null,
                     cityId = cityId,
                     quantity = quantityDelta
@@ -1102,23 +1165,23 @@ class SndmartRepository(
         persistCartToBackend()
     }
 
-    fun updateCartItemQuantity(productId: String, isHotel: Boolean, newQty: Int) {
+    fun updateCartItemQuantity(productId: String, isHotel: Boolean, newQty: Int, variantId: String? = null) {
         if (isHotel) {
             val current = _hotelCart.value
             if (newQty <= 0) {
-                _hotelCart.value = current.filter { it.productId != productId }
+                _hotelCart.value = current.filter { !(it.productId == productId && it.variantId == variantId) }
             } else {
                 _hotelCart.value = current.map {
-                    if (it.productId == productId) it.copy(quantity = newQty) else it
+                    if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                 }
             }
         } else {
             val current = _groceryCart.value
             if (newQty <= 0) {
-                _groceryCart.value = current.filter { it.productId != productId }
+                _groceryCart.value = current.filter { !(it.productId == productId && it.variantId == variantId) }
             } else {
                 _groceryCart.value = current.map {
-                    if (it.productId == productId) it.copy(quantity = newQty) else it
+                    if (it.productId == productId && it.variantId == variantId) it.copy(quantity = newQty) else it
                 }
             }
         }
@@ -1904,6 +1967,96 @@ class SndmartRepository(
         }
     }
 
+    // --- RAZORPAY PAYMENT (EDGE FUNCTIONS) ---
+
+    suspend fun createRazorpayOrder(orderId: String): Result<RazorpayOrderResponse> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.failure(Exception("Supabase API key is not configured"))
+        }
+        return try {
+            val request = CreateRazorpayOrderRequest(orderId = orderId)
+            val response = api.createRazorpayOrder(request)
+            if (response.isSuccessful && response.body() != null) {
+                val bodyStr = response.body()!!.string()
+                Log.d(TAG, "createRazorpayOrder response: $bodyStr")
+                val json = JSONObject(bodyStr)
+                val keyId = json.optString("key_id", json.optString("key", ""))
+                val amount = json.optDouble("amount", 0.0)
+                val currency = json.optString("currency", "INR")
+                val rzpOrderId = json.optString("razorpay_order_id", json.optString("order_id", json.optString("id", "")))
+                val error = if (json.has("error") && !json.isNull("error")) json.optString("error") else null
+                val message = if (json.has("message") && !json.isNull("message")) json.optString("message") else null
+
+                if (rzpOrderId.isNotBlank()) {
+                    Result.success(
+                        RazorpayOrderResponse(
+                            keyId = keyId,
+                            amount = amount,
+                            currency = currency,
+                            razorpayOrderId = rzpOrderId,
+                            error = error,
+                            message = message
+                        )
+                    )
+                } else {
+                    val errMsg = message ?: error ?: "Could not create payment order"
+                    Result.failure(Exception(errMsg))
+                }
+            } else {
+                val errorStr = response.errorBody()?.string() ?: ""
+                val cleanMsg = extractCleanErrorMessage(errorStr, response.code())
+                Log.e(TAG, "createRazorpayOrder failed HTTP ${response.code()}: $cleanMsg")
+                Result.failure(Exception("Could not start payment. Please try again."))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception creating Razorpay order: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun verifyRazorpayPayment(
+        orderId: String,
+        razorpayOrderId: String,
+        razorpayPaymentId: String,
+        razorpaySignature: String
+    ): Result<VerifyRazorpayPaymentResponse> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.failure(Exception("Supabase API key is not configured"))
+        }
+        return try {
+            val request = VerifyRazorpayPaymentRequest(
+                orderId = orderId,
+                razorpayOrderId = razorpayOrderId,
+                razorpayPaymentId = razorpayPaymentId,
+                razorpaySignature = razorpaySignature
+            )
+            val response = api.verifyRazorpayPayment(request)
+            if (response.isSuccessful && response.body() != null) {
+                val bodyStr = response.body()!!.string()
+                Log.d(TAG, "verifyRazorpayPayment response: $bodyStr")
+                val json = JSONObject(bodyStr)
+                val success = json.optBoolean("success", false)
+                val message = if (json.has("message") && !json.isNull("message")) json.optString("message") else null
+                val error = if (json.has("error") && !json.isNull("error")) json.optString("error") else null
+                Result.success(
+                    VerifyRazorpayPaymentResponse(
+                        success = success,
+                        message = message,
+                        error = error
+                    )
+                )
+            } else {
+                val errorStr = response.errorBody()?.string() ?: ""
+                val cleanMsg = extractCleanErrorMessage(errorStr, response.code())
+                Log.e(TAG, "verifyRazorpayPayment failed HTTP ${response.code()}: $cleanMsg")
+                Result.failure(Exception(cleanMsg.ifBlank { "Payment could not be verified. If money was deducted, it will be refunded shortly - contact support if this persists." }))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in verifyRazorpayPayment: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     // --- ORDERS (LIST & DETAIL) ---
     suspend fun getOrders(userId: String, limit: Int? = null, offset: Int? = null): Result<List<Order>> {
         return try {
@@ -2175,17 +2328,27 @@ class SndmartRepository(
     }
 
     // --- DEVICE TOKENS (PUSH NOTIFICATIONS) ---
+    suspend fun registerCustomerFcmToken(token: String): Result<Unit> {
+        val userId = sessionManager.userId.value ?: sessionManager.getUserId()
+        if (userId.isNullOrBlank()) {
+            Log.d(TAG, "registerCustomerFcmToken: No authenticated user present, skipping")
+            return Result.failure(IllegalStateException("No current user logged in"))
+        }
+        return registerDeviceToken(userId, token)
+    }
+
     suspend fun registerDeviceToken(userId: String, token: String): Result<Unit> {
         return try {
             val deviceToken = DeviceToken(
                 userId = userId,
                 userType = "customer",
                 fcmToken = token,
-                active = true
+                active = true,
+                firebaseProject = "native" // CRITICAL - must be exactly native
             )
             val response = api.registerDeviceToken(deviceToken)
             if (response.isSuccessful) {
-                Log.d(TAG, "Device token registered successfully for $userId")
+                Log.d(TAG, "Device token registered successfully for $userId with firebase_project=native")
                 Result.success(Unit)
             } else {
                 val error = SupabaseClient.parseErrorMessage(response)
@@ -2280,7 +2443,9 @@ class SndmartRepository(
             val valueObj = firstObj.optJSONObject("value")
             if (valueObj != null) {
                 val enabled = valueObj.optBoolean("enabled", false)
-                val message = valueObj.optString("message", null)?.takeIf { it.isNotBlank() && it != "null" }
+                val message = if (valueObj.has("message") && !valueObj.isNull("message")) {
+                    valueObj.optString("message").takeIf { it.isNotBlank() && it != "null" }
+                } else null
                 MaintenanceSettings(enabled = enabled, message = message)
             } else {
                 val boolVal = firstObj.optBoolean("value", false)

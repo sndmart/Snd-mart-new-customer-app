@@ -228,14 +228,6 @@ fun ProfileScreen(
                             onClick = onNavigateToHelp,
                             testTag = "menu_item_help"
                         )
-                        HorizontalDivider()
-                        ProfileMenuItem(
-                            icon = Icons.Outlined.Tune,
-                            title = "Supabase Connection Settings",
-                            subtitle = "View API endpoint and configure anon key",
-                            onClick = onOpenSettings,
-                            testTag = "menu_item_settings"
-                        )
                     }
                 }
             }

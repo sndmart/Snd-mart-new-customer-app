@@ -44,7 +44,12 @@ object PhoneUtils {
      * Checks if the raw input resolves to a valid 10-digit Indian phone number.
      */
     fun isValidPhoneNumber(rawInput: String): Boolean {
-        val nationalNumber = to10Digits(rawInput)
-        return nationalNumber.length == 10
+        val digits = rawInput.replace(Regex("\\D"), "")
+        val withoutCountryCode = if (digits.startsWith("91") && digits.length > 10) {
+            digits.substring(2)
+        } else {
+            digits
+        }
+        return withoutCountryCode.length == 10
     }
 }

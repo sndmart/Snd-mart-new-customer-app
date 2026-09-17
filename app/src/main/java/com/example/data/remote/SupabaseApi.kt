@@ -107,7 +107,7 @@ interface SupabaseApi {
         @Query("vendor_type") vendorType: String? = null,
         @Query("is_active") isActive: String? = null,
         @Query("name", encoded = true) name: String? = null,
-        @Query("select") select: String? = null,
+        @Query("select") select: String = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time",
         @Query("order") order: String = "is_active.desc,is_featured.desc,name.asc",
         @Query("limit") limit: Int? = null,
         @Query("offset") offset: Int? = null
@@ -116,12 +116,13 @@ interface SupabaseApi {
     @GET("rest/v1/vendors")
     suspend fun getVendorsByIds(
         @Query("id") idInQuery: String,
-        @Query("select") select: String = "id,name"
+        @Query("select") select: String = "id,name,banner_url"
     ): Response<List<Vendor>>
 
     @GET("rest/v1/vendors")
     suspend fun getVendorById(
-        @Query("id") idQuery: String
+        @Query("id") idQuery: String,
+        @Query("select") select: String = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time"
     ): Response<List<Vendor>>
 
     // --- PRODUCTS ---
@@ -441,6 +442,18 @@ interface SupabaseApi {
         @Query("key") key: String = "eq.maintenance_mode",
         @Query("select") select: String = "value",
         @Query("limit") limit: Int = 1
+    ): Response<ResponseBody>
+
+    // --- RAZORPAY PAYMENT (EDGE FUNCTIONS) ---
+
+    @POST("functions/v1/create-razorpay-order")
+    suspend fun createRazorpayOrder(
+        @Body body: CreateRazorpayOrderRequest
+    ): Response<ResponseBody>
+
+    @POST("functions/v1/verify-razorpay-payment")
+    suspend fun verifyRazorpayPayment(
+        @Body body: VerifyRazorpayPaymentRequest
     ): Response<ResponseBody>
 }
 

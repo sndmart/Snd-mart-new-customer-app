@@ -136,7 +136,36 @@ object DemoCatalog {
             isAvailable = true,
             isActive = true,
             isFeatured = false,
-            imageUrl = "https://images.unsplash.com/photo-1618512496248-a07fe83aa8cb?w=500&q=80"
+            imageUrl = "https://images.unsplash.com/photo-1618512496248-a07fe83aa8cb?w=500&q=80",
+            productVariants = listOf(
+                ProductVariant(
+                    id = "var_onion_500g",
+                    label = "500g",
+                    isActive = true,
+                    cityStock = listOf(
+                        ProductVariantCityStock(price = 15.0, stockQty = 50, isAvailable = true, cityId = "city_sindhanur"),
+                        ProductVariantCityStock(price = 15.0, stockQty = 50, isAvailable = true, cityId = null)
+                    )
+                ),
+                ProductVariant(
+                    id = "var_onion_1kg",
+                    label = "1 kg",
+                    isActive = true,
+                    cityStock = listOf(
+                        ProductVariantCityStock(price = 28.0, stockQty = 40, isAvailable = true, cityId = "city_sindhanur"),
+                        ProductVariantCityStock(price = 28.0, stockQty = 40, isAvailable = true, cityId = null)
+                    )
+                ),
+                ProductVariant(
+                    id = "var_onion_2kg",
+                    label = "2 kg",
+                    isActive = true,
+                    cityStock = listOf(
+                        ProductVariantCityStock(price = 52.0, stockQty = 25, isAvailable = true, cityId = "city_sindhanur"),
+                        ProductVariantCityStock(price = 52.0, stockQty = 25, isAvailable = true, cityId = null)
+                    )
+                )
+            )
         ),
         Product(
             id = "p_potato",
@@ -266,11 +295,46 @@ object DemoCatalog {
     )
 
     val HOTEL_CATEGORIES = listOf(
-        Category(id = "hcat_biryani", name = "Biryani & Rice", vendorType = "hotel", vendorId = "vendor_royal_palace", isActive = true),
-        Category(id = "hcat_curries", name = "Gravies & Curries", vendorType = "hotel", vendorId = "vendor_royal_palace", isActive = true),
-        Category(id = "hcat_tiffin", name = "South Indian Tiffins", vendorType = "hotel", vendorId = "vendor_krishna_bhavan", isActive = true),
-        Category(id = "hcat_meals", name = "Thali & Meals", vendorType = "hotel", vendorId = "vendor_krishna_bhavan", isActive = true),
-        Category(id = "hcat_tandoor", name = "Tandoor & Starters", vendorType = "hotel", vendorId = "vendor_green_garden", isActive = true)
+        Category(
+            id = "hcat_biryani",
+            name = "Biryani & Rice",
+            vendorType = "hotel",
+            vendorId = "vendor_royal_palace",
+            isActive = true,
+            imageUrl = "https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=200&q=80"
+        ),
+        Category(
+            id = "hcat_curries",
+            name = "Gravies & Curries",
+            vendorType = "hotel",
+            vendorId = "vendor_royal_palace",
+            isActive = true,
+            imageUrl = "https://images.unsplash.com/photo-1631452180519-c014fe946bc7?w=200&q=80"
+        ),
+        Category(
+            id = "hcat_tiffin",
+            name = "South Indian Tiffins",
+            vendorType = "hotel",
+            vendorId = "vendor_krishna_bhavan",
+            isActive = true,
+            imageUrl = "https://images.unsplash.com/photo-1589301760014-d929f3979dbc?w=200&q=80"
+        ),
+        Category(
+            id = "hcat_meals",
+            name = "Thali & Meals",
+            vendorType = "hotel",
+            vendorId = "vendor_krishna_bhavan",
+            isActive = true,
+            imageUrl = "https://images.unsplash.com/photo-1626777552726-4a6b54c97e46?w=200&q=80"
+        ),
+        Category(
+            id = "hcat_tandoor",
+            name = "Tandoor & Starters",
+            vendorType = "hotel",
+            vendorId = "vendor_green_garden",
+            isActive = true,
+            imageUrl = "https://images.unsplash.com/photo-1599488615731-7e5c2823ff28?w=200&q=80"
+        )
     )
 
     val HOTEL_PRODUCTS = listOf(

@@ -290,21 +290,23 @@ fun CartScreen(
                     }
 
                     // Cart Items List
-                    items(freshItems, key = { it.cartItem.productId }) { itemUi ->
+                    items(freshItems, key = { "${it.cartItem.productId}_${it.cartItem.variantId ?: "base"}" }) { itemUi ->
                         CartItemRow(
                             item = itemUi,
                             onIncrease = {
                                 repository.updateCartItemQuantity(
                                     productId = itemUi.cartItem.productId,
                                     isHotel = isHotelCartSelected,
-                                    newQty = itemUi.cartItem.quantity + 1
+                                    newQty = itemUi.cartItem.quantity + 1,
+                                    variantId = itemUi.cartItem.variantId
                                 )
                             },
                             onDecrease = {
                                 repository.updateCartItemQuantity(
                                     productId = itemUi.cartItem.productId,
                                     isHotel = isHotelCartSelected,
-                                    newQty = itemUi.cartItem.quantity - 1
+                                    newQty = itemUi.cartItem.quantity - 1,
+                                    variantId = itemUi.cartItem.variantId
                                 )
                             }
                         )
@@ -350,10 +352,11 @@ fun CartItemRow(
     onIncrease: () -> Unit,
     onDecrease: () -> Unit
 ) {
+    val tagSuffix = "${item.cartItem.productId}${item.cartItem.variantId?.let { "_$it" } ?: ""}"
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("cart_item_${item.cartItem.productId}"),
+            .testTag("cart_item_$tagSuffix"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
@@ -381,14 +384,14 @@ fun CartItemRow(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = item.product.name,
+                    text = item.displayName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "₹${"%.0f".format(item.product.effectivePrice)}${if (!item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
+                    text = "₹${"%.0f".format(item.effectivePrice)}${if (item.variant != null) "" else if (!item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -404,7 +407,7 @@ fun CartItemRow(
                 quantity = item.cartItem.quantity,
                 onIncrease = onIncrease,
                 onDecrease = onDecrease,
-                testTagPrefix = "cart_item_${item.cartItem.productId}"
+                testTagPrefix = "cart_item_$tagSuffix"
             )
         }
     }

@@ -25,13 +25,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import androidx.compose.ui.platform.LocalContext
 import com.example.data.model.*
 import com.example.data.repository.SndmartRepository
 import com.example.data.session.UserSessionManager
 import com.example.ui.components.AddressPickerDialog
 import com.example.ui.components.ErrorCard
 import com.example.ui.theme.*
+import com.example.util.RazorpayPaymentManager
+import com.example.util.RazorpayPaymentResult
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+
+private fun Context.findActivity(): Activity? {
+    var ctx = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,10 +109,69 @@ fun CheckoutScreen(
     var selectedPaymentMethod by remember { mutableStateOf("cod") }
 
     // Order placement state
+    val context = LocalContext.current
     var isPlacingOrder by remember { mutableStateOf(false) }
+    var placingOrderMessage by remember { mutableStateOf("Placing Order...") }
+    var activePaymentOrder by remember { mutableStateOf<Order?>(null) }
+    var activePaymentRpData by remember { mutableStateOf<RazorpayOrderResponse?>(null) }
     var placementError by remember { mutableStateOf<String?>(null) }
     var activeMaintenanceMessage by remember { mutableStateOf<String?>(null) }
     var isCheckingMaintenanceOnRetry by remember { mutableStateOf(false) }
+
+    // Listen for Razorpay payment callback results
+    LaunchedEffect(Unit) {
+        RazorpayPaymentManager.paymentResult.collectLatest { result ->
+            val currentOrder = activePaymentOrder ?: return@collectLatest
+            val currentRpData = activePaymentRpData
+            when (result) {
+                is RazorpayPaymentResult.Error -> {
+                    isPlacingOrder = false
+                    activePaymentOrder = null
+                    activePaymentRpData = null
+                    val isDismissOrCancelled = result.code == 0 ||
+                        result.response?.contains("cancelled", ignoreCase = true) == true
+                    if (isDismissOrCancelled) {
+                        snackbarHostState.showSnackbar("Payment cancelled. You can retry from your Orders page.")
+                    } else {
+                        val errMsg = result.response?.takeIf { it.isNotBlank() }
+                            ?: "Payment cancelled. You can retry from your Orders page."
+                        snackbarHostState.showSnackbar(errMsg)
+                    }
+                }
+                is RazorpayPaymentResult.Success -> {
+                    // Step 4 — Verify the payment server-side
+                    placingOrderMessage = "Verifying payment..."
+                    isPlacingOrder = true
+                    val rzpPaymentId = result.paymentData?.paymentId ?: result.razorpayPaymentId ?: ""
+                    val rzpOrderId = result.paymentData?.orderId?.takeIf { it.isNotBlank() }
+                        ?: currentRpData?.razorpayOrderId
+                        ?: ""
+                    val rzpSignature = result.paymentData?.signature
+                        ?: result.paymentData?.data?.optString("razorpay_signature")
+                        ?: ""
+
+                    val verifyResult = repository.verifyRazorpayPayment(
+                        orderId = currentOrder.id ?: "",
+                        razorpayOrderId = rzpOrderId,
+                        razorpayPaymentId = rzpPaymentId,
+                        razorpaySignature = rzpSignature
+                    )
+
+                    isPlacingOrder = false
+                    activePaymentOrder = null
+                    activePaymentRpData = null
+
+                    if (verifyResult.isFailure || verifyResult.getOrNull()?.success != true) {
+                        val err = "Payment could not be verified. If money was deducted, it will be refunded shortly - contact support if this persists."
+                        placementError = err
+                        snackbarHostState.showSnackbar(err)
+                    } else {
+                        onOrderPlacedSuccess(currentOrder.id ?: "")
+                    }
+                }
+            }
+        }
+    }
 
     // Add Address Modal state
     var showAddAddressDialog by remember { mutableStateOf(false) }
@@ -404,6 +479,7 @@ fun CheckoutScreen(
 
                             coroutineScope.launch {
                                 isPlacingOrder = true
+                                placingOrderMessage = "Placing Order..."
                                 placementError = null
 
                                 // Pre-checkout maintenance check: prevent order attempt if maintenance mode was turned on
@@ -444,8 +520,53 @@ fun CheckoutScreen(
 
                                 if (res.isSuccess) {
                                     val order = res.getOrNull()!!
-                                    isPlacingOrder = false
-                                    onOrderPlacedSuccess(order.id ?: "")
+                                    if (selectedPaymentMethod == "upi") {
+                                        // Step 2 — Create the Razorpay order for this Sndmart order
+                                        placingOrderMessage = "Initiating UPI payment..."
+                                        val rpRes = repository.createRazorpayOrder(order.id ?: "")
+                                        if (rpRes.isFailure) {
+                                            isPlacingOrder = false
+                                            val err = "Could not start payment. Please try again."
+                                            placementError = err
+                                            snackbarHostState.showSnackbar(err)
+                                            return@launch
+                                        }
+
+                                        val rpData = rpRes.getOrNull()!!
+                                        val activity = context.findActivity()
+                                        if (activity == null) {
+                                            isPlacingOrder = false
+                                            snackbarHostState.showSnackbar("Unable to open payment screen. Please try again.")
+                                            return@launch
+                                        }
+
+                                        activePaymentOrder = order
+                                        activePaymentRpData = rpData
+
+                                        // Step 3 — Open Razorpay Checkout, restricted to UPI only
+                                        val openRes = RazorpayPaymentManager.startUpiCheckout(
+                                            activity = activity,
+                                            keyId = rpData.keyId,
+                                            amountInPaise = rpData.amountInPaise,
+                                            currency = rpData.currency,
+                                            razorpayOrderId = rpData.razorpayOrderId,
+                                            orderNumber = order.orderNumber.ifBlank { order.id ?: "" },
+                                            userPhone = sessionManager.userPhone.value,
+                                            userEmail = sessionManager.userEmail.value
+                                        )
+
+                                        if (openRes.isFailure) {
+                                            isPlacingOrder = false
+                                            activePaymentOrder = null
+                                            activePaymentRpData = null
+                                            val err = "Could not start payment. Please try again."
+                                            placementError = err
+                                            snackbarHostState.showSnackbar(err)
+                                        }
+                                    } else {
+                                        isPlacingOrder = false
+                                        onOrderPlacedSuccess(order.id ?: "")
+                                    }
                                 } else {
                                     isPlacingOrder = false
                                     val err = res.exceptionOrNull()?.message ?: "Failed to place order"
@@ -468,10 +589,11 @@ fun CheckoutScreen(
                         if (isPlacingOrder || isLoadingDeliverySettings) {
                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (isPlacingOrder) "Placing Order..." else "Loading Options...")
+                            Text(if (isPlacingOrder) placingOrderMessage else "Loading Options...")
                         } else {
                             val totalText = if (totalAmount != null) " • ₹${"%.0f".format(totalAmount)}" else ""
-                            Text("Confirm & Place Order$totalText", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            val actionLabel = if (selectedPaymentMethod == "upi") "Pay via UPI" else "Confirm & Place Order"
+                            Text("$actionLabel$totalText", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                     }
                 }

@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.core.*
@@ -44,10 +47,22 @@ import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.maps.android.compose.*
+import com.example.util.RazorpayPaymentManager
+import com.example.util.RazorpayPaymentResult
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+
+private fun Context.findActivity(): Activity? {
+    var ctx = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,6 +98,11 @@ fun OrderDetailScreen(
 
     // Reorder loading state
     var isReordering by remember { mutableStateOf(false) }
+
+    // Payment retry state
+    var isPayingUpi by remember { mutableStateOf(false) }
+    var upiPaymentMessage by remember { mutableStateOf("Starting payment...") }
+    var activeRpData by remember { mutableStateOf<RazorpayOrderResponse?>(null) }
 
     // Polling function for active orders
     fun loadOrderData(isSilent: Boolean = false) {
@@ -153,6 +173,54 @@ fun OrderDetailScreen(
                 if (reviewedRes.isSuccess) reviewedOrderIds = reviewedRes.getOrNull() ?: emptySet()
             }
             if (!isSilent) isLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        RazorpayPaymentManager.paymentResult.collectLatest { result ->
+            if (!isPayingUpi) return@collectLatest
+            val currentRpData = activeRpData
+            when (result) {
+                is RazorpayPaymentResult.Error -> {
+                    isPayingUpi = false
+                    activeRpData = null
+                    val isDismissOrCancelled = result.code == 0 ||
+                        result.response?.contains("cancelled", ignoreCase = true) == true
+                    if (isDismissOrCancelled) {
+                        snackbarHostState.showSnackbar("Payment cancelled.")
+                    } else {
+                        val errMsg = result.response?.takeIf { it.isNotBlank() } ?: "Payment could not be completed."
+                        snackbarHostState.showSnackbar(errMsg)
+                    }
+                }
+                is RazorpayPaymentResult.Success -> {
+                    upiPaymentMessage = "Verifying payment..."
+                    val rzpPaymentId = result.paymentData?.paymentId ?: result.razorpayPaymentId ?: ""
+                    val rzpOrderId = result.paymentData?.orderId?.takeIf { it.isNotBlank() }
+                        ?: currentRpData?.razorpayOrderId
+                        ?: ""
+                    val rzpSignature = result.paymentData?.signature
+                        ?: result.paymentData?.data?.optString("razorpay_signature")
+                        ?: ""
+
+                    val verifyResult = repository.verifyRazorpayPayment(
+                        orderId = orderId,
+                        razorpayOrderId = rzpOrderId,
+                        razorpayPaymentId = rzpPaymentId,
+                        razorpaySignature = rzpSignature
+                    )
+
+                    isPayingUpi = false
+                    activeRpData = null
+
+                    if (verifyResult.isFailure || verifyResult.getOrNull()?.success != true) {
+                        snackbarHostState.showSnackbar("Payment could not be verified. If money was deducted, it will be refunded shortly - contact support if this persists.")
+                    } else {
+                        snackbarHostState.showSnackbar("Payment successful and verified!")
+                        loadOrderData(isSilent = false)
+                    }
+                }
+            }
         }
     }
 
@@ -541,6 +609,68 @@ fun OrderDetailScreen(
                                 BillRow("Handling Fee", "₹${"%.2f".format(currentOrder.handlingFee)}")
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
                                 BillRow("Total Paid / Due", "₹${"%.2f".format(currentOrder.totalAmount)}", isBold = true, fontSize = 16.sp, color = NaturalPrimary)
+
+                                if (currentOrder.paymentMethod.lowercase() == "upi" &&
+                                    currentOrder.paymentStatus.lowercase() != "paid" &&
+                                    currentOrder.status.lowercase() != "cancelled" &&
+                                    currentOrder.status.lowercase() != "rejected"
+                                ) {
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    Button(
+                                        onClick = {
+                                            coroutineScope.launch {
+                                                isPayingUpi = true
+                                                upiPaymentMessage = "Initiating UPI payment..."
+                                                val rpRes = repository.createRazorpayOrder(orderId)
+                                                if (rpRes.isFailure) {
+                                                    isPayingUpi = false
+                                                    snackbarHostState.showSnackbar("Could not start payment. Please try again.")
+                                                    return@launch
+                                                }
+                                                val rpData = rpRes.getOrNull()!!
+                                                val activity = context.findActivity()
+                                                if (activity == null) {
+                                                    isPayingUpi = false
+                                                    snackbarHostState.showSnackbar("Unable to open payment screen. Please try again.")
+                                                    return@launch
+                                                }
+                                                activeRpData = rpData
+                                                val openRes = RazorpayPaymentManager.startUpiCheckout(
+                                                    activity = activity,
+                                                    keyId = rpData.keyId,
+                                                    amountInPaise = rpData.amountInPaise,
+                                                    currency = rpData.currency,
+                                                    razorpayOrderId = rpData.razorpayOrderId,
+                                                    orderNumber = currentOrder.orderNumber.ifBlank { currentOrder.id ?: "" },
+                                                    userPhone = null,
+                                                    userEmail = null
+                                                )
+                                                if (openRes.isFailure) {
+                                                    isPayingUpi = false
+                                                    activeRpData = null
+                                                    snackbarHostState.showSnackbar("Could not start payment. Please try again.")
+                                                }
+                                            }
+                                        },
+                                        enabled = !isPayingUpi,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("retry_upi_payment_button"),
+                                        colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        if (isPayingUpi) {
+                                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(upiPaymentMessage, color = Color.White, fontSize = 14.sp)
+                                        } else {
+                                            Icon(Icons.Default.Payment, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("Pay Now via UPI (₹${"%.0f".format(currentOrder.totalAmount)})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
