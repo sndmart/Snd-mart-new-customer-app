@@ -2,7 +2,7 @@ package com.example.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.Indication
-import androidx.compose.foundation.IndicationInstance
+import androidx.compose.foundation.IndicationNodeFactory
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
@@ -14,12 +14,16 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.node.CompositionLocalConsumerModifierNode
+import androidx.compose.ui.node.DelegatableNode
+import androidx.compose.ui.node.DelegatingNode
+import androidx.compose.ui.node.currentValueOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlinx.coroutines.launch
 
 private val DarkColorScheme = darkColorScheme(
     primary = NaturalPrimaryLight,
@@ -64,26 +68,39 @@ private val LightColorScheme = lightColorScheme(
 // Wraps the ambient ripple indication so every clickable, Button, IconButton, etc. that
 // relies on LocalIndication (i.e. almost everything) gives a short haptic tick on tap,
 // like Swiggy/Zomato-style tactile feedback, without touching each screen individually.
-@Composable
-private fun rememberHapticIndication(original: Indication): Indication {
-    val haptic = LocalHapticFeedback.current
-    return remember(original, haptic) {
-        object : Indication {
-            @Composable
-            override fun rememberUpdatedInstance(interactionSource: InteractionSource): IndicationInstance {
-                val originalInstance = original.rememberUpdatedInstance(interactionSource)
-                LaunchedEffect(interactionSource) {
-                    interactionSource.interactions.collect { interaction ->
-                        if (interaction is PressInteraction.Release) {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        }
-                    }
+// Delegates actual visuals to the original indication's node so ripple still renders.
+private class HapticIndicationNode(
+    private val interactionSource: InteractionSource,
+    private val original: Indication
+) : DelegatingNode(), CompositionLocalConsumerModifierNode {
+
+    override fun onAttach() {
+        if (original is IndicationNodeFactory) {
+            delegate(original.create(interactionSource))
+        }
+        coroutineScope.launch {
+            interactionSource.interactions.collect { interaction ->
+                if (interaction is PressInteraction.Release) {
+                    currentValueOf(LocalHapticFeedback).performHapticFeedback(HapticFeedbackType.LongPress)
                 }
-                return originalInstance
             }
         }
     }
 }
+
+private class HapticIndicationNodeFactory(private val original: Indication) : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode =
+        HapticIndicationNode(interactionSource, original)
+
+    override fun equals(other: Any?): Boolean =
+        other is HapticIndicationNodeFactory && other.original == original
+
+    override fun hashCode(): Int = original.hashCode()
+}
+
+@Composable
+private fun rememberHapticIndication(original: Indication): Indication =
+    remember(original) { HapticIndicationNodeFactory(original) }
 
 @Composable
 fun SndmartTheme(
