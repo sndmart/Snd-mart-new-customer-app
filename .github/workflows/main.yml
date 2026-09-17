@@ -13,26 +13,25 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Set up Java JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '9.3.1'
 
-      - name: Prepare Keystore File
-        run: |
-          # signing.keystore ko upload-key.jks naam se copy kar do taaki gradle ko mil jaye
-          find . -name "signing.keystore" -execdir cp signing.keystore upload-key.jks \; 2>/dev/null || true
-          find . -name "gradlew" -exec chmod +x {} \;
-
-      - name: Build Android App Bundle (AAB)
-        working-directory: Snd-mart-new-customer-app
-        run: ./gradlew bundleRelease
+      - name: Build Signed Android App Bundle (AAB)
+        run: gradle :app:bundleRelease --no-daemon
         env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_PATH: app/signing.keystore
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
@@ -40,5 +39,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sndmart-release-bundle
-          path: "**/build/outputs/bundle/release/*.aab"
-          
+          path: app/build/outputs/bundle/release/*.aab
