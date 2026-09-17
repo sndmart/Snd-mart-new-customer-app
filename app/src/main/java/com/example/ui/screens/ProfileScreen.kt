@@ -200,17 +200,6 @@ fun ProfileScreen(
                         )
                         HorizontalDivider()
                         ProfileMenuItem(
-                            icon = Icons.Outlined.AccountBalanceWallet,
-                            title = "Sndmart Wallet",
-                            subtitle = "View balance & automatic order refunds",
-                            onClick = {
-                                if (isLoggedIn) onNavigateToWallet()
-                                else onRequireLogin()
-                            },
-                            testTag = "menu_item_wallet"
-                        )
-                        HorizontalDivider()
-                        ProfileMenuItem(
                             icon = Icons.Outlined.Star,
                             title = "My Reviews",
                             subtitle = "Reviews you have submitted",
@@ -227,14 +216,6 @@ fun ProfileScreen(
                             subtitle = "Call, WhatsApp or email us",
                             onClick = onNavigateToHelp,
                             testTag = "menu_item_help"
-                        )
-                        HorizontalDivider()
-                        ProfileMenuItem(
-                            icon = Icons.Outlined.Tune,
-                            title = "Supabase Connection Settings",
-                            subtitle = "View API endpoint and configure anon key",
-                            onClick = onOpenSettings,
-                            testTag = "menu_item_settings"
                         )
                     }
                 }
