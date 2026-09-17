@@ -210,15 +210,20 @@ fun HomeScreen(
         }
     }
 
-    // Re-fetch fresh data whenever the screen resumes (e.g., navigating back)
+    // Re-fetch fresh data whenever the screen resumes (e.g., navigating back). Only the
+    // currently active tab's data is refreshed — no point re-fetching hotels while the
+    // customer is browsing groceries, or vice versa.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, selectedCity?.id) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 val cityId = selectedCity?.id
                 if (cityId != null) {
-                    loadGroceryProducts(cityId, searchQuery)
-                    loadHotelsData(cityId, searchQuery)
+                    if (browsingMode == BrowsingMode.HOTELS) {
+                        loadHotelsData(cityId, searchQuery)
+                    } else {
+                        loadGroceryProducts(cityId, searchQuery)
+                    }
                 }
             }
         }
@@ -229,18 +234,22 @@ fun HomeScreen(
     }
 
     // Categories load once on mount and again whenever the city changes (cheap: cached after
-    // the first successful fetch, and categories aren't city-scoped).
+    // the first successful fetch, and categories aren't city-scoped). Hotels are NOT fetched
+    // here — like Swiggy/Zomato, only the screen/tab the customer is actually looking at
+    // fetches its data. Hotels load lazily, below, the first time the Hotels tab is opened.
     LaunchedEffect(selectedCity?.id) {
         loadGroceryCategories()
-        val cityId = selectedCity?.id ?: return@LaunchedEffect
-        loadHotelsData(cityId, "")
     }
 
-    // Hotel search is server-side (name=ilike), debounced, only while on the hotels tab.
-    LaunchedEffect(searchQuery, browsingMode) {
+    // Hotels load on first opening the Hotels tab, and again on city change while on it.
+    // Search text is server-side (name=ilike) and debounced; switching tabs/city is not.
+    var lastSearchQueryForHotels by remember { mutableStateOf(searchQuery) }
+    LaunchedEffect(browsingMode, selectedCity?.id, searchQuery) {
         if (browsingMode != BrowsingMode.HOTELS) return@LaunchedEffect
         val cityId = selectedCity?.id ?: return@LaunchedEffect
-        delay(350)
+        val isSearchChange = searchQuery != lastSearchQueryForHotels
+        lastSearchQueryForHotels = searchQuery
+        if (isSearchChange) delay(350)
         loadHotelsData(cityId, searchQuery)
     }
 

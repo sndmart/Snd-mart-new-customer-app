@@ -834,7 +834,16 @@ class SndmartRepository(
             .sortedBy { it.price }
     }
 
-    suspend fun getHotelMenu(vendorId: String, cityId: String): Result<Pair<List<Category>, List<ResolvedProduct>>> {
+    // Rule 1: Hotel menu items are paginated (30 at a time), like the grocery grid, so a
+    // hotel with a large menu doesn't load its entire catalog on open. Categories are
+    // fetched server-side scoped to this vendor only (not the whole categories table) and
+    // only on the first page — they don't change across pages.
+    suspend fun getHotelMenu(
+        vendorId: String,
+        cityId: String,
+        limit: Int = 30,
+        offset: Int = 0
+    ): Result<Pair<List<Category>, List<ResolvedProduct>>> {
         if (!SupabaseClient.isKeyConfigured()) {
             return Result.success(getFallbackHotelMenu(vendorId))
         }
@@ -842,26 +851,32 @@ class SndmartRepository(
             // Rule 4: Run independent category and product requests in parallel
             val (categories, products) = kotlinx.coroutines.coroutineScope {
                 val catDeferred = async {
-                    api.getCategories(order = "sort_order.asc")
+                    if (offset == 0) api.getCategories(vendorId = "eq.$vendorId", order = "sort_order.asc") else null
                 }
                 val prodDeferred = async {
                     api.getProducts(
                         isActive = null,
                         vendorId = "eq.$vendorId",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured"
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                        limit = limit,
+                        offset = offset
                     )
                 }
                 val catResponse = catDeferred.await()
-                if (!catResponse.isSuccessful) {
-                    val error = SupabaseClient.parseErrorMessage(catResponse)
-                    Log.w(TAG, "Could not fetch hotel categories: $error")
-                    if (catResponse.code() == 401) {
-                        sessionManager.notifySessionExpired("Your session expired, please log in again")
-                        throw SessionExpiredException("Your session expired, please log in again")
+                val cats = if (catResponse != null) {
+                    if (!catResponse.isSuccessful) {
+                        val error = SupabaseClient.parseErrorMessage(catResponse)
+                        Log.w(TAG, "Could not fetch hotel categories: $error")
+                        if (catResponse.code() == 401) {
+                            sessionManager.notifySessionExpired("Your session expired, please log in again")
+                            throw SessionExpiredException("Your session expired, please log in again")
+                        }
+                        throw ApiException(catResponse.code(), error)
                     }
-                    throw ApiException(catResponse.code(), error)
+                    catResponse.body() ?: emptyList()
+                } else {
+                    emptyList()
                 }
-                val cats = catResponse.body()?.filter { it.vendorId == vendorId } ?: emptyList()
 
                 val prodResponse = prodDeferred.await()
                 if (!prodResponse.isSuccessful || prodResponse.body() == null) {

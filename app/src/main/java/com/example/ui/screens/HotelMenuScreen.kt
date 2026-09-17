@@ -54,39 +54,59 @@ fun HotelMenuScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    val MENU_PAGE_SIZE = 30
+
     var vendor by remember { mutableStateOf<Vendor?>(null) }
     var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
     var allProducts by remember { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var isLoadingMore by remember { mutableStateOf(false) }
+    var hasMoreProducts by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val hotelCart by repository.hotelCart.collectAsState()
     var pendingConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
 
-    fun loadMenu() {
+    // Rule 1: menu items load 30 at a time, not the whole menu — categories only need
+    // fetching on the first page since they don't change across pages.
+    fun loadMenu(reset: Boolean = true) {
         coroutineScope.launch {
-            isLoading = true
-            errorMessage = null
+            if (reset) {
+                isLoading = true
+                errorMessage = null
+            } else {
+                isLoadingMore = true
+            }
+            val offset = if (reset) 0 else allProducts.size
             // Rule 4: Parallelize independent requests
             coroutineScope {
-                val vDeferred = async { repository.getVendor(vendorId) }
-                val menuDeferred = async { repository.getHotelMenu(vendorId = vendorId, cityId = cityId) }
+                val vDeferred = if (reset) async { repository.getVendor(vendorId) } else null
+                val menuDeferred = async {
+                    repository.getHotelMenu(vendorId = vendorId, cityId = cityId, limit = MENU_PAGE_SIZE, offset = offset)
+                }
 
-                val vRes = vDeferred.await()
-                if (vRes.isSuccess) {
-                    vendor = vRes.getOrNull()
+                if (vDeferred != null) {
+                    val vRes = vDeferred.await()
+                    if (vRes.isSuccess) {
+                        vendor = vRes.getOrNull()
+                    }
                 }
 
                 val res = menuDeferred.await()
                 if (res.isSuccess) {
                     val pair = res.getOrNull()!!
-                    categories = pair.first
-                    allProducts = pair.second
-                } else {
+                    if (pair.first.isNotEmpty()) {
+                        categories = pair.first
+                    }
+                    val newProducts = pair.second
+                    allProducts = if (reset) newProducts else (allProducts + newProducts).distinctBy { it.id }
+                    hasMoreProducts = newProducts.size >= MENU_PAGE_SIZE
+                } else if (reset) {
                     errorMessage = res.exceptionOrNull()?.message
                 }
             }
             isLoading = false
+            isLoadingMore = false
         }
     }
 
@@ -415,6 +435,29 @@ fun HotelMenuScreen(
                                     )
                                 }
                             )
+                        }
+                    }
+
+                    if (hasMoreProducts) {
+                        item(key = "load_more_menu_items") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 12.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isLoadingMore) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(28.dp),
+                                        strokeWidth = 2.5.dp,
+                                        color = NaturalPrimary
+                                    )
+                                } else {
+                                    OutlinedButton(onClick = { loadMenu(reset = false) }) {
+                                        Text("Load More Items")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
