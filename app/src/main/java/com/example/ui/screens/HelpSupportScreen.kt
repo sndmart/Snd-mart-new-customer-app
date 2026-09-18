@@ -22,11 +22,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
 
-// NOTE: These are PLACEHOLDER support contact details. Swap for real support contact
-// info (phone, WhatsApp number, email) before launch.
-private const val SUPPORT_PHONE = "+910000000000"
-private const val SUPPORT_WHATSAPP = "910000000000"
-private const val SUPPORT_EMAIL = "support@sndmart.in"
+private const val SUPPORT_PHONE = "+919353461742"
+private const val SUPPORT_WHATSAPP = "919110604033"
+private const val SUPPORT_EMAIL = "sndmartt@gmail.com"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
