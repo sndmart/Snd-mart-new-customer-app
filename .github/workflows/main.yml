@@ -27,8 +27,8 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Build Signed Android App Bundle (AAB)
-        run: gradle :app:bundleRelease --no-daemon
+      - name: Build Signed Android App Bundle (AAB) and APK
+        run: gradle :app:bundleRelease :app:assembleRelease --no-daemon
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/app/signing.keystore
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -40,3 +40,9 @@ jobs:
         with:
           name: sndmart-release-bundle
           path: app/build/outputs/bundle/release/*.aab
+
+      - name: Upload Signed APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sndmart-release-apk
+          path: app/build/outputs/apk/release/*.apk
