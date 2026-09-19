@@ -4,9 +4,14 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import com.example.data.session.UserSessionManager
+import java.io.File
 
-class SndmartApp : Application() {
+class SndmartApp : Application(), ImageLoaderFactory {
 
     lateinit var sessionManager: UserSessionManager
         private set
@@ -14,10 +19,38 @@ class SndmartApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        ensureWebViewCacheDirs()
         sessionManager = UserSessionManager(this)
         createNotificationChannel()
         initFirebaseSafety()
         com.example.data.remote.GoogleMapsConfig.initializePlaces(this)
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizePercent(0.25) // 25% of available app memory
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizePercent(0.02) // 2% of device storage
+                    .build()
+            }
+            .crossfade(true)
+            .build()
+    }
+
+    private fun ensureWebViewCacheDirs() {
+        try {
+            val codeCacheDir = File(cacheDir, "WebView/Default/HTTP Cache/Code Cache")
+            File(codeCacheDir, "js").mkdirs()
+            File(codeCacheDir, "wasm").mkdirs()
+        } catch (e: Throwable) {
+            // Safe fallback if directory creation is restricted
+        }
     }
 
     private fun initFirebaseSafety() {

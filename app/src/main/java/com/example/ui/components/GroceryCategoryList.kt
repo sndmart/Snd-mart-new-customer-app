@@ -15,12 +15,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Scale
 import com.example.data.model.Category
 import androidx.compose.runtime.remember
 import com.example.ui.theme.*
@@ -113,7 +116,11 @@ private fun GroceryCategoryCard(
             val fallbackPainter = androidx.compose.ui.graphics.vector.rememberVectorPainter(fallbackIcon)
             if (!imageUrl.isNullOrBlank()) {
                 AsyncImage(
-                    model = imageUrl,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(imageUrl)
+                        .crossfade(300)
+                        .scale(Scale.FILL)
+                        .build(),
                     contentDescription = name,
                     contentScale = ContentScale.Crop,
                     placeholder = fallbackPainter,

@@ -103,9 +103,9 @@ class StartupChecksUnitTest {
             versionResponse = listOf(
                 AppVersionInfo(
                     platform = "customer_app",
-                    minimumSupportedVersion = "1.2.0",
+                    minimumSupportedVersion = "2.0.0",
                     forceUpdate = false,
-                    updateMessage = "Please update to v1.2.0 to access new features."
+                    updateMessage = "Please update to v2.0.0 to access new features."
                 )
             )
         )
@@ -115,7 +115,7 @@ class StartupChecksUnitTest {
 
         assertTrue(result is StartupCheckResult.BlockingUpdate)
         val blocking = result as StartupCheckResult.BlockingUpdate
-        assertEquals("Please update to v1.2.0 to access new features.", blocking.updateMessage)
+        assertEquals("Please update to v2.0.0 to access new features.", blocking.updateMessage)
     }
 
     @Test

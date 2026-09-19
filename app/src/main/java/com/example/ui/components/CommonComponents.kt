@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -24,6 +25,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Scale
 import com.example.data.model.City
 import com.example.service.InAppNotification
 import com.example.ui.theme.*
@@ -39,7 +42,8 @@ fun SndmartTopBar(
     onCityClick: () -> Unit,
     onCartClick: () -> Unit,
     onNotificationsClick: (() -> Unit)? = null,
-    onSettingsClick: (() -> Unit)? = null
+    onSettingsClick: (() -> Unit)? = null,
+    onRefresh: (() -> Unit)? = null
 ) {
     val displayDeliverTo = remember(currentCity, deliveryAddressLabel) {
         val cityName = currentCity?.name ?: "Select City"
@@ -107,6 +111,27 @@ fun SndmartTopBar(
             }
         },
         actions = {
+            if (onRefresh != null) {
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.testTag("topbar_refresh_button")
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = NaturalPrimaryContainer,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh",
+                                tint = NaturalPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
             if (onNotificationsClick != null) {
                 IconButton(
                     onClick = onNotificationsClick,
@@ -338,7 +363,11 @@ fun ProductImage(
 ) {
     if (!url.isNullOrBlank()) {
         AsyncImage(
-            model = url,
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(url)
+                .crossfade(300)
+                .scale(Scale.FILL)
+                .build(),
             contentDescription = contentDescription,
             modifier = modifier,
             contentScale = ContentScale.Crop

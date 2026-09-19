@@ -38,6 +38,10 @@ class SndmartRepository(
 ) {
     private val TAG = "SndmartRepository"
 
+    companion object {
+        const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes short-lived cache
+    }
+
     val unreadNotificationCount: StateFlow<Int>
         get() = sessionManager.unreadNotificationCount
 
@@ -61,24 +65,117 @@ class SndmartRepository(
     // Local in-memory state for offline/demo operation when Supabase key is unconfigured or offline
     private val _localAddresses = MutableStateFlow<List<CustomerAddress>>(emptyList())
 
-    // Rule 6: In-memory caches for slow-changing data
+    // In-memory cache entry with short-lived TTL
+    data class CacheEntry<T>(
+        val data: List<T>,
+        val timestamp: Long = System.currentTimeMillis(),
+        val hasMore: Boolean = false
+    ) {
+        fun isExpired(ttlMs: Long = CACHE_TTL_MS): Boolean =
+            System.currentTimeMillis() - timestamp > ttlMs
+    }
+
+    // Rule 6: In-memory caches for slow-changing data with short-lived TTL
     private var cachedCities: List<City>? = null
     private var cachedGroceryCategories: List<Category>? = null
+    private var cachedGroceryCategoriesTimestamp: Long = 0L
     private val cachedProfiles = java.util.concurrent.ConcurrentHashMap<String, Profile>()
     private val cachedVendorNames = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val cachedHotelsByCity = java.util.concurrent.ConcurrentHashMap<String, List<Vendor>>()
 
+    // Smart in-memory caches for products, hotels, and hotel menus
+    private val groceryProductsCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<ResolvedProduct>>()
+    private val hotelsCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<Vendor>>()
+    private val hotelCategoriesCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<Category>>()
+    private val hotelProductsCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<ResolvedProduct>>()
+
     fun getCachedHotels(cityId: String?): List<Vendor>? {
         if (cityId.isNullOrBlank()) return null
+        val cached = hotelsCache["$cityId:"]
+        if (cached != null && !cached.isExpired()) {
+            return cached.data
+        }
         return cachedHotelsByCity[cityId]
+    }
+
+    fun getCachedGroceryProducts(cityId: String?, categoryId: String?, searchQuery: String? = null): List<ResolvedProduct>? {
+        if (cityId.isNullOrBlank() || categoryId.isNullOrBlank()) return null
+        val cleanQuery = searchQuery?.trim()?.lowercase().orEmpty()
+        val cacheKey = "$cityId:$categoryId:$cleanQuery"
+        val cached = groceryProductsCache[cacheKey]
+        if (cached != null && !cached.isExpired()) {
+            return cached.data
+        }
+        return null
+    }
+
+    fun getCachedGroceryCategories(): List<Category>? {
+        if (cachedGroceryCategories != null && (System.currentTimeMillis() - cachedGroceryCategoriesTimestamp < CACHE_TTL_MS)) {
+            return cachedGroceryCategories
+        }
+        return null
+    }
+
+    fun getCachedHotelCategories(vendorId: String?): List<Category>? {
+        if (vendorId.isNullOrBlank()) return null
+        val cached = hotelCategoriesCache[vendorId]
+        if (cached != null && !cached.isExpired()) {
+            return cached.data
+        }
+        return null
+    }
+
+    fun getCachedHotelProducts(vendorId: String?, cityId: String?, categoryId: String?): List<ResolvedProduct>? {
+        if (vendorId.isNullOrBlank() || cityId.isNullOrBlank()) return null
+        val cacheKey = "$vendorId:$cityId:${categoryId.orEmpty()}"
+        val cached = hotelProductsCache[cacheKey]
+        if (cached != null && !cached.isExpired()) {
+            return cached.data
+        }
+        return null
+    }
+
+    fun invalidateGroceryProductsCache(cityId: String? = null, categoryId: String? = null) {
+        if (cityId == null) {
+            groceryProductsCache.clear()
+        } else if (categoryId == null) {
+            groceryProductsCache.keys.filter { it.startsWith("$cityId:") }.forEach { groceryProductsCache.remove(it) }
+        } else {
+            groceryProductsCache.keys.filter { it.startsWith("$cityId:$categoryId:") }.forEach { groceryProductsCache.remove(it) }
+        }
+    }
+
+    fun invalidateHotelsCache(cityId: String? = null) {
+        if (cityId == null) {
+            hotelsCache.clear()
+            cachedHotelsByCity.clear()
+        } else {
+            hotelsCache.keys.filter { it.startsWith("$cityId:") }.forEach { hotelsCache.remove(it) }
+            cachedHotelsByCity.remove(cityId)
+        }
+    }
+
+    fun invalidateHotelMenuCache(vendorId: String? = null) {
+        if (vendorId == null) {
+            hotelProductsCache.clear()
+            hotelCategoriesCache.clear()
+        } else {
+            hotelCategoriesCache.remove(vendorId)
+            hotelProductsCache.keys.filter { it.startsWith("$vendorId:") }.forEach { hotelProductsCache.remove(it) }
+        }
     }
 
     fun clearCaches() {
         cachedCities = null
         cachedGroceryCategories = null
+        cachedGroceryCategoriesTimestamp = 0L
         cachedProfiles.clear()
         cachedVendorNames.clear()
         cachedHotelsByCity.clear()
+        groceryProductsCache.clear()
+        hotelsCache.clear()
+        hotelCategoriesCache.clear()
+        hotelProductsCache.clear()
     }
 
     // --- SESSION MANAGEMENT ---
@@ -557,7 +654,7 @@ class SndmartRepository(
         if (!SupabaseClient.isKeyConfigured()) {
             return Result.success(demoGroceryCategories)
         }
-        if (!forceRefresh && cachedGroceryCategories != null) {
+        if (!forceRefresh && cachedGroceryCategories != null && (System.currentTimeMillis() - cachedGroceryCategoriesTimestamp < CACHE_TTL_MS)) {
             return Result.success(cachedGroceryCategories!!)
         }
         return try {
@@ -572,6 +669,7 @@ class SndmartRepository(
             if (response.isSuccessful && response.body() != null) {
                 val list = response.body()!!
                 cachedGroceryCategories = list
+                cachedGroceryCategoriesTimestamp = System.currentTimeMillis()
                 Log.i(TAG, "Categories fetched successfully: ${list.size} categories found: ${list.map { it.name }}")
                 Result.success(list)
             } else {
@@ -592,6 +690,7 @@ class SndmartRepository(
                 if (fallbackResponse.isSuccessful && fallbackResponse.body() != null) {
                     val fallbackList = fallbackResponse.body()!!
                     cachedGroceryCategories = fallbackList
+                    cachedGroceryCategoriesTimestamp = System.currentTimeMillis()
                     Log.i(TAG, "Categories fetched via fallback: ${fallbackList.size} categories found: ${fallbackList.map { it.name }}")
                     Result.success(fallbackList)
                 } else {
@@ -617,15 +716,33 @@ class SndmartRepository(
         cityId: String,
         searchQuery: String? = null,
         limit: Int = 20,
-        offset: Int = 0
+        offset: Int = 0,
+        forceRefresh: Boolean = false
     ): Result<List<Vendor>> {
+        val cleanQuery = searchQuery?.trim()?.lowercase().orEmpty()
+        val cacheKey = "$cityId:$cleanQuery"
+
+        if (offset == 0 && !forceRefresh) {
+            val cached = hotelsCache[cacheKey]
+            if (cached != null && !cached.isExpired()) {
+                cachedHotelsByCity[cityId] = cached.data
+                return Result.success(cached.data)
+            }
+        }
+
         if (!SupabaseClient.isKeyConfigured()) {
             val demo = if (!searchQuery.isNullOrBlank())
                 DemoCatalog.HOTELS.filter { it.name.contains(searchQuery, ignoreCase = true) }
             else DemoCatalog.HOTELS
             val paged = demo.drop(offset).take(limit)
-            if (searchQuery.isNullOrBlank() && offset == 0) {
-                cachedHotelsByCity[cityId] = paged
+            if (offset == 0) {
+                hotelsCache[cacheKey] = CacheEntry(data = paged, hasMore = demo.size > limit)
+                if (searchQuery.isNullOrBlank()) {
+                    cachedHotelsByCity[cityId] = paged
+                }
+            } else {
+                val existing = hotelsCache[cacheKey]?.data ?: emptyList()
+                hotelsCache[cacheKey] = CacheEntry(data = (existing + paged).distinctBy { it.id }, hasMore = demo.size > offset + limit)
             }
             return Result.success(paged)
         }
@@ -653,8 +770,15 @@ class SndmartRepository(
                         }
                     }.thenBy { it.name.lowercase() }
                 )
-                if (searchQuery.isNullOrBlank() && offset == 0) {
-                    cachedHotelsByCity[cityId] = sorted
+                if (offset == 0) {
+                    hotelsCache[cacheKey] = CacheEntry(data = sorted, hasMore = sorted.size >= limit)
+                    if (searchQuery.isNullOrBlank()) {
+                        cachedHotelsByCity[cityId] = sorted
+                    }
+                } else {
+                    val existing = hotelsCache[cacheKey]?.data ?: emptyList()
+                    val combined = (existing + sorted).distinctBy { it.id }
+                    hotelsCache[cacheKey] = CacheEntry(data = combined, hasMore = sorted.size >= limit)
                 }
                 Result.success(sorted)
             } else {
@@ -779,16 +903,33 @@ class SndmartRepository(
         categoryId: String? = null,
         searchQuery: String? = null,
         limit: Int = 30,
-        offset: Int = 0
+        offset: Int = 0,
+        forceRefresh: Boolean = false
     ): Result<List<ResolvedProduct>> {
         val effectiveCatId = categoryId
             ?: cachedGroceryCategories?.firstOrNull { it.name.contains("veg", ignoreCase = true) }?.id
             ?: demoGroceryCategories.firstOrNull { it.name.contains("veg", ignoreCase = true) }?.id
             ?: "cat_veg"
 
+        val cleanQuery = searchQuery?.trim()?.lowercase().orEmpty()
+        val cacheKey = "$cityId:$effectiveCatId:$cleanQuery"
+
+        if (offset == 0 && !forceRefresh) {
+            val cached = groceryProductsCache[cacheKey]
+            if (cached != null && !cached.isExpired()) {
+                return Result.success(cached.data)
+            }
+        }
+
         if (!SupabaseClient.isKeyConfigured()) {
             val demo = getFallbackGroceryProducts(effectiveCatId, searchQuery)
             val paged = demo.drop(offset).take(limit)
+            if (offset == 0) {
+                groceryProductsCache[cacheKey] = CacheEntry(data = paged, hasMore = demo.size > limit)
+            } else {
+                val existing = groceryProductsCache[cacheKey]?.data ?: emptyList()
+                groceryProductsCache[cacheKey] = CacheEntry(data = (existing + paged).distinctBy { it.id }, hasMore = demo.size > offset + limit)
+            }
             return Result.success(paged)
         }
         return try {
@@ -853,9 +994,184 @@ class SndmartRepository(
                 compareByDescending<ResolvedProduct> { it.isInStockAndActive }
                     .thenBy { it.name.lowercase() }
             )
+
+            if (offset == 0) {
+                groceryProductsCache[cacheKey] = CacheEntry(data = resolved, hasMore = resolved.size >= limit)
+            } else {
+                val existing = groceryProductsCache[cacheKey]?.data ?: emptyList()
+                val combined = (existing + resolved).distinctBy { it.id }
+                groceryProductsCache[cacheKey] = CacheEntry(data = combined, hasMore = resolved.size >= limit)
+            }
             Result.success(resolved)
         } catch (e: Exception) {
             Log.w(TAG, "Exception fetching grocery products: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    // Hotel menu categories: cached per vendorId
+    suspend fun getHotelCategories(vendorId: String, forceRefresh: Boolean = false): Result<List<Category>> {
+        if (!forceRefresh) {
+            val cached = hotelCategoriesCache[vendorId]
+            if (cached != null && !cached.isExpired()) {
+                return Result.success(cached.data)
+            }
+        }
+        if (!SupabaseClient.isKeyConfigured()) {
+            val cats = DemoCatalog.HOTEL_CATEGORIES.filter { it.vendorId == vendorId }
+            hotelCategoriesCache[vendorId] = CacheEntry(cats)
+            return Result.success(cats)
+        }
+        return try {
+            val response = api.getCategories(
+                select = "id,name,image_url,vendor_id,is_active,sort_order",
+                vendorId = "eq.$vendorId",
+                isActive = "eq.true",
+                order = "sort_order.asc"
+            )
+            if (response.isSuccessful && response.body() != null) {
+                val cats = response.body()!!.filter { (it.vendorId == null || it.vendorId == vendorId) && it.isActive }
+                hotelCategoriesCache[vendorId] = CacheEntry(cats)
+                Result.success(cats)
+            } else {
+                val error = SupabaseClient.parseErrorMessage(response)
+                Log.w(TAG, "Could not fetch hotel categories: $error")
+                if (response.code() == 401) {
+                    sessionManager.notifySessionExpired("Your session expired, please log in again")
+                    return Result.failure(SessionExpiredException("Your session expired, please log in again"))
+                }
+                Result.failure(ApiException(response.code(), error))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception fetching hotel categories: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    // Hotel menu items: paginated (20-30 at a time, default 25), cached per vendorId + categoryId
+    suspend fun getHotelProducts(
+        vendorId: String,
+        cityId: String,
+        categoryId: String? = null,
+        limit: Int = 25,
+        offset: Int = 0,
+        forceRefresh: Boolean = false
+    ): Result<List<ResolvedProduct>> {
+        val cacheKey = "$vendorId:$cityId:${categoryId.orEmpty()}"
+
+        if (offset == 0 && !forceRefresh) {
+            val cached = hotelProductsCache[cacheKey]
+            if (cached != null && !cached.isExpired()) {
+                return Result.success(cached.data)
+            }
+        }
+
+        if (!SupabaseClient.isKeyConfigured()) {
+            val prods = DemoCatalog.HOTEL_PRODUCTS.filter {
+                (it.vendorId == vendorId || vendorId.isBlank()) &&
+                (categoryId == null || it.categoryId == categoryId)
+            }
+            val resolved = prods.map { prod ->
+                ResolvedProduct(
+                    baseProduct = prod,
+                    effectivePrice = prod.price,
+                    effectiveMrp = prod.mrp,
+                    effectiveStock = prod.stockQty ?: 50,
+                    effectiveIsAvailable = prod.isAvailable
+                )
+            }.sortedWith(
+                compareBy<ResolvedProduct> { prod ->
+                    val isAvail = prod.isHotelItemAvailable
+                    when {
+                        isAvail && prod.isFeatured -> 0
+                        isAvail -> 1
+                        else -> 2
+                    }
+                }.thenBy { it.name.lowercase() }
+            )
+            val paged = resolved.drop(offset).take(limit)
+            if (offset == 0) {
+                hotelProductsCache[cacheKey] = CacheEntry(data = paged, hasMore = resolved.size > limit)
+            } else {
+                val existing = hotelProductsCache[cacheKey]?.data ?: emptyList()
+                hotelProductsCache[cacheKey] = CacheEntry(data = (existing + paged).distinctBy { it.id }, hasMore = resolved.size > offset + limit)
+            }
+            return Result.success(paged)
+        }
+
+        return try {
+            val catQuery = categoryId?.takeIf { it.isNotBlank() }?.let { "eq.$it" }
+            val prodResponse = api.getProducts(
+                isActive = "eq.true",
+                vendorId = "eq.$vendorId",
+                categoryId = catQuery,
+                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                order = "is_featured.desc",
+                limit = limit,
+                offset = offset
+            )
+            if (!prodResponse.isSuccessful || prodResponse.body() == null) {
+                val error = SupabaseClient.parseErrorMessage(prodResponse)
+                Log.w(TAG, "Could not fetch hotel products: $error")
+                if (prodResponse.code() == 401) {
+                    sessionManager.notifySessionExpired("Your session expired, please log in again")
+                    return Result.failure(SessionExpiredException("Your session expired, please log in again"))
+                }
+                return Result.failure(ApiException(prodResponse.code(), error))
+            }
+            val products = prodResponse.body()!!
+
+            val productIds = products.map { it.id }.filter { it.isNotBlank() }
+            val stockMap = if (productIds.isNotEmpty()) {
+                val stockResponse = api.getProductCityStockBatch(
+                    cityId = "eq.$cityId",
+                    productIdsQuery = "in.(${productIds.joinToString(",")})",
+                    select = "product_id,price,mrp,stock_qty,is_available"
+                )
+                if (stockResponse.isSuccessful && stockResponse.body() != null) {
+                    stockResponse.body()!!.associateBy { it.productId }
+                } else {
+                    emptyMap()
+                }
+            } else {
+                emptyMap()
+            }
+
+            val resolved = products.map { prod ->
+                val override = stockMap[prod.id]
+                val price = override?.price ?: prod.price
+                val mrp = override?.mrp ?: prod.mrp
+                val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
+                val isAvail = override?.isAvailable ?: prod.isAvailable
+                ResolvedProduct(
+                    baseProduct = prod,
+                    effectivePrice = price,
+                    effectiveMrp = mrp,
+                    effectiveStock = stock,
+                    effectiveIsAvailable = isAvail,
+                    variants = emptyList()
+                )
+            }.sortedWith(
+                compareBy<ResolvedProduct> { prod ->
+                    val isAvail = prod.isHotelItemAvailable
+                    when {
+                        isAvail && prod.isFeatured -> 0
+                        isAvail -> 1
+                        else -> 2
+                    }
+                }.thenBy { it.name.lowercase() }
+            )
+
+            if (offset == 0) {
+                hotelProductsCache[cacheKey] = CacheEntry(data = resolved, hasMore = resolved.size >= limit)
+            } else {
+                val existing = hotelProductsCache[cacheKey]?.data ?: emptyList()
+                val combined = (existing + resolved).distinctBy { it.id }
+                hotelProductsCache[cacheKey] = CacheEntry(data = combined, hasMore = resolved.size >= limit)
+            }
+            Result.success(resolved)
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception fetching hotel products: ${e.message}", e)
             Result.failure(e)
         }
     }

@@ -147,7 +147,7 @@ data class ResolvedProduct(
         }
 
     val isHotelItemAvailable: Boolean
-        get() = baseProduct.isActive && effectiveIsAvailable && (effectiveStock > 0 || baseProduct.stockQty == null)
+        get() = baseProduct.isActive && effectiveIsAvailable
 }
 
 @JsonClass(generateAdapter = true)

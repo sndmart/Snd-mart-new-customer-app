@@ -1,7 +1,7 @@
 package com.example.util
 
 object VersionUtils {
-    const val CURRENT_APP_VERSION = "1.0.0"
+    const val CURRENT_APP_VERSION = "1.6"
 
     /**
      * Compare version strings formatted as x.y.z (e.g. "1.0.0" vs "1.0.1").

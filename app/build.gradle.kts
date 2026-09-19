@@ -17,8 +17,8 @@ android {
     applicationId = "in.sndmart.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "1.5"
+    versionCode = 7
+    versionName = "1.6"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = "YOUR_GOOGLE_MAPS_API_KEY"
@@ -29,7 +29,7 @@ android {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+      keyAlias = "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {

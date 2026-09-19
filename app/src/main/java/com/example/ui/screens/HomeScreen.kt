@@ -9,10 +9,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -73,23 +75,41 @@ fun HomeScreen(
     val GROCERY_PAGE_SIZE = 30
     val HOTEL_PAGE_SIZE = 20
 
-    // Grocery data
-    var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
-    var selectedCategoryId by remember { mutableStateOf<String?>(null) }
-    var groceryProducts by remember { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
-    var isGroceryLoading by remember { mutableStateOf(true) }
+    // Smart in-memory cached initialization for categories
+    var categories by remember {
+        mutableStateOf(repository.getCachedGroceryCategories() ?: emptyList())
+    }
+    var selectedCategoryId by remember {
+        mutableStateOf(
+            categories.firstOrNull { it.name.lowercase().contains("veg") }?.id
+                ?: categories.firstOrNull()?.id
+        )
+    }
+    var groceryProducts by remember {
+        mutableStateOf(
+            repository.getCachedGroceryProducts(selectedCity?.id, selectedCategoryId, searchQuery) ?: emptyList()
+        )
+    }
+    var isGroceryLoading by remember { mutableStateOf(groceryProducts.isEmpty()) }
     var isLoadingMoreProducts by remember { mutableStateOf(false) }
     var hasMoreProducts by remember { mutableStateOf(true) }
     var groceryError by remember { mutableStateOf<String?>(null) }
 
-    // Hotels data
+    // Hotels data - explicitly empty and NOT loading on startup / grocery mode
     var hotels by remember {
-        mutableStateOf(repository.getCachedHotels(selectedCity?.id) ?: emptyList())
+        mutableStateOf<List<Vendor>>(emptyList())
     }
-    var isHotelsLoading by remember { mutableStateOf(hotels.isEmpty()) }
+    var isHotelsLoading by remember { mutableStateOf(false) }
     var isLoadingMoreHotels by remember { mutableStateOf(false) }
     var hasMoreHotels by remember { mutableStateOf(true) }
     var hotelsError by remember { mutableStateOf<String?>(null) }
+
+    // Tracking state to prevent duplicate/redundant fetches for same city + category
+    var lastLoadedCityId by remember { mutableStateOf<String?>(null) }
+    var lastLoadedCategoryId by remember { mutableStateOf<String?>(null) }
+    var lastLoadedQuery by remember { mutableStateOf("") }
+    var lastLoadedHotelsCityId by remember { mutableStateOf<String?>(null) }
+    var lastLoadedHotelsQuery by remember { mutableStateOf("") }
 
     // Cart state
     val groceryCart by repository.groceryCart.collectAsState()
@@ -157,10 +177,13 @@ fun HomeScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Grocery categories (vendor_type IN grocery/vegetable/fruit, vendor_id IS NULL, is_active=true)
-    // Fetched dynamically from Supabase without city restriction, and errors are properly logged.
-    fun loadGroceryCategories(cityId: String? = null) {
+    // Fetched dynamically from Supabase without city restriction, with smart in-memory caching.
+    fun loadGroceryCategories(forceRefresh: Boolean = false) {
+        if (!forceRefresh && categories.isNotEmpty()) {
+            return
+        }
         coroutineScope.launch {
-            val catRes = repository.getGroceryCategories()
+            val catRes = repository.getGroceryCategories(forceRefresh = forceRefresh)
             if (catRes.isSuccess) {
                 val list = catRes.getOrNull() ?: emptyList()
                 val filtered = list.filter { c ->
@@ -177,28 +200,61 @@ fun HomeScreen(
             } else {
                 val error = catRes.exceptionOrNull()
                 Log.e("HomeScreen", "Categories fetch error: ${error?.message}", error)
-                categories = emptyList()
-                if (groceryProducts.isEmpty()) {
-                    groceryError = error?.message
+                if (categories.isEmpty()) {
+                    categories = emptyList()
+                    if (groceryProducts.isEmpty()) {
+                        groceryError = error?.message
+                    }
                 }
             }
         }
     }
 
-    // Grocery products depend on city + selected category + search query.
-    // Product grid query is always scoped to selectedCategoryId (Vegitables by default), never unfiltered "All".
-    // Rule 1: Paginate by 30 at a time.
-    fun loadGroceryProducts(cityId: String, query: String, categoryId: String? = selectedCategoryId, reset: Boolean = true) {
-        coroutineScope.launch {
-            val effectiveCatId = categoryId
-                ?: selectedCategoryId
-                ?: categories.firstOrNull { it.name.lowercase().contains("veg") }?.id
-                ?: categories.firstOrNull()?.id
-            if (effectiveCatId == null) {
-                // Category not resolved yet; do not execute unfiltered "All" query
-                return@launch
-            }
+    val groceryGridState = rememberLazyGridState()
+    val hotelsListState = rememberLazyListState()
 
+    // Grocery products depend on city + selected category + search query.
+    // Product grid query is always scoped to selectedCategoryId (Vegetables by default), never unfiltered "All".
+    // Rule 1: Paginate by 30 at a time.
+    // Rule 3: Prevent unnecessary re-fetching when same city + category data is already loaded.
+    fun loadGroceryProducts(
+        cityId: String,
+        query: String,
+        categoryId: String? = selectedCategoryId,
+        reset: Boolean = true,
+        forceRefresh: Boolean = false
+    ) {
+        val effectiveCatId = categoryId
+            ?: selectedCategoryId
+            ?: categories.firstOrNull { it.name.lowercase().contains("veg") }?.id
+            ?: categories.firstOrNull()?.id
+        if (effectiveCatId == null) {
+            // Category not resolved yet; do not execute unfiltered "All" query
+            return
+        }
+
+        // Prevent duplicate re-fetching when the same city + category + query is already loaded
+        if (reset && !forceRefresh && groceryProducts.isNotEmpty() &&
+            cityId == lastLoadedCityId && effectiveCatId == lastLoadedCategoryId && query == lastLoadedQuery
+        ) {
+            return
+        }
+
+        // Check in-memory cache first for instant category switching (zero network requests)
+        if (reset && !forceRefresh) {
+            val cached = repository.getCachedGroceryProducts(cityId, effectiveCatId, query.ifBlank { null })
+            if (cached != null && cached.isNotEmpty()) {
+                groceryProducts = cached
+                lastLoadedCityId = cityId
+                lastLoadedCategoryId = effectiveCatId
+                lastLoadedQuery = query
+                isGroceryLoading = false
+                hasMoreProducts = cached.size >= GROCERY_PAGE_SIZE
+                return
+            }
+        }
+
+        coroutineScope.launch {
             if (reset) {
                 isGroceryLoading = true
                 groceryError = null
@@ -212,7 +268,8 @@ fun HomeScreen(
                 categoryId = effectiveCatId,
                 searchQuery = query.ifBlank { null },
                 limit = GROCERY_PAGE_SIZE,
-                offset = offset
+                offset = offset,
+                forceRefresh = forceRefresh
             )
             if (prodRes.isSuccess) {
                 val newProducts = prodRes.getOrNull() ?: emptyList()
@@ -221,6 +278,9 @@ fun HomeScreen(
                         compareByDescending<ResolvedProduct> { it.isInStockAndActive }
                             .thenBy { it.name.lowercase() }
                     )
+                    lastLoadedCityId = cityId
+                    lastLoadedCategoryId = effectiveCatId
+                    lastLoadedQuery = query
                 } else {
                     groceryProducts = (groceryProducts + newProducts).distinctBy { it.id }.sortedWith(
                         compareByDescending<ResolvedProduct> { it.isInStockAndActive }
@@ -241,7 +301,38 @@ fun HomeScreen(
 
     // Refresh function for hotels.
     // Rule 1: Hotel list: 20 at a time.
-    fun loadHotelsData(cityId: String, query: String, reset: Boolean = true) {
+    // Rule 2: Do NOT load hotels during App/Grocery startup. Load only when customer opens Food section.
+    // Rule 3: Prevent redundant re-fetching when already loaded.
+    fun loadHotelsData(
+        cityId: String,
+        query: String,
+        reset: Boolean = true,
+        forceRefresh: Boolean = false
+    ) {
+        if (browsingMode != BrowsingMode.HOTELS) {
+            return
+        }
+
+        // Prevent redundant re-fetch if same city + query already loaded
+        if (reset && !forceRefresh && hotels.isNotEmpty() &&
+            cityId == lastLoadedHotelsCityId && query == lastLoadedHotelsQuery
+        ) {
+            return
+        }
+
+        // Check in-memory cache for instant switch to Food section
+        if (reset && !forceRefresh) {
+            val cached = repository.getCachedHotels(cityId)
+            if (cached != null && cached.isNotEmpty()) {
+                hotels = cached
+                lastLoadedHotelsCityId = cityId
+                lastLoadedHotelsQuery = query
+                isHotelsLoading = false
+                hasMoreHotels = cached.size >= HOTEL_PAGE_SIZE
+                return
+            }
+        }
+
         coroutineScope.launch {
             if (reset) {
                 isHotelsLoading = true
@@ -255,7 +346,8 @@ fun HomeScreen(
                 cityId = cityId,
                 searchQuery = query.ifBlank { null },
                 limit = HOTEL_PAGE_SIZE,
-                offset = offset
+                offset = offset,
+                forceRefresh = forceRefresh
             )
             if (res.isSuccess) {
                 val newHotels = res.getOrNull() ?: emptyList()
@@ -269,6 +361,8 @@ fun HomeScreen(
                             }
                         }.thenBy { it.name.lowercase() }
                     )
+                    lastLoadedHotelsCityId = cityId
+                    lastLoadedHotelsQuery = query
                 } else {
                     hotels = (hotels + newHotels).distinctBy { it.id }.sortedWith(
                         compareBy<Vendor> { vendor ->
@@ -291,72 +385,90 @@ fun HomeScreen(
         }
     }
 
-    // Re-fetch fresh data whenever the screen resumes (e.g., navigating back)
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, selectedCity?.id) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                val cityId = selectedCity?.id
-                if (cityId != null) {
-                    val catId = selectedCategoryId
-                    if (catId != null) {
-                        loadGroceryProducts(cityId, searchQuery, catId)
-                    }
-                    loadHotelsData(cityId, searchQuery)
-                }
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
+    // Auto-paginate grocery grid on scroll near bottom
+    val shouldLoadMoreGrocery by remember {
+        derivedStateOf {
+            val layoutInfo = groceryGridState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleItemIndex >= totalItems - 4
         }
     }
 
-    // Initial category load
+    LaunchedEffect(shouldLoadMoreGrocery) {
+        if (shouldLoadMoreGrocery && hasMoreProducts && !isLoadingMoreProducts && !isGroceryLoading) {
+            val cityId = selectedCity?.id
+            if (cityId != null) {
+                loadGroceryProducts(cityId, searchQuery, selectedCategoryId, reset = false)
+            }
+        }
+    }
+
+    // Auto-paginate hotels list on scroll near bottom
+    val shouldLoadMoreHotels by remember {
+        derivedStateOf {
+            val layoutInfo = hotelsListState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleItemIndex >= totalItems - 3
+        }
+    }
+
+    LaunchedEffect(shouldLoadMoreHotels) {
+        if (shouldLoadMoreHotels && hasMoreHotels && !isLoadingMoreHotels && !isHotelsLoading) {
+            val cityId = selectedCity?.id
+            if (cityId != null) {
+                loadHotelsData(cityId, searchQuery, reset = false)
+            }
+        }
+    }
+
+    // Startup / Category loading: Load grocery categories once if not already cached
     LaunchedEffect(Unit) {
-        loadGroceryCategories()
+        if (categories.isEmpty()) {
+            loadGroceryCategories()
+        }
     }
 
-    // On categories load, default-select "Vegitables" (never "All")
-    LaunchedEffect(categories) {
-        if (categories.isNotEmpty()) {
-            val vegCategory = categories.firstOrNull { it.name.lowercase().contains("veg") }
-                ?: categories.firstOrNull()
-            if (vegCategory != null && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
-                selectedCategoryId = vegCategory.id
+    // Main data loading effect: strictly loads based on active browsingMode and city.
+    // Does NOT load Hotels during App/Grocery startup.
+    LaunchedEffect(browsingMode, selectedCity?.id, selectedCategoryId) {
+        val cityId = selectedCity?.id ?: return@LaunchedEffect
+        if (browsingMode == BrowsingMode.HOTELS) {
+            loadHotelsData(cityId, searchQuery)
+        } else {
+            // BrowsingMode.GROCERY
+            if (categories.isEmpty()) {
+                loadGroceryCategories()
+            }
+            val catId = selectedCategoryId
+            if (catId != null) {
+                loadGroceryProducts(cityId, searchQuery, catId)
             }
         }
     }
 
-    // Categories + hotels reload when the city changes.
-    LaunchedEffect(selectedCity?.id) {
-        loadGroceryCategories()
+    // Grocery search query change (debounced so typing doesn't spam backend).
+    var lastSearchedGroceryQuery by remember { mutableStateOf("") }
+    LaunchedEffect(searchQuery, browsingMode) {
+        if (browsingMode != BrowsingMode.GROCERY) return@LaunchedEffect
+        if (searchQuery == lastSearchedGroceryQuery) return@LaunchedEffect
         val cityId = selectedCity?.id ?: return@LaunchedEffect
-        loadHotelsData(cityId, "")
+        val catId = selectedCategoryId ?: return@LaunchedEffect
+        delay(350)
+        lastSearchedGroceryQuery = searchQuery
+        loadGroceryProducts(cityId, searchQuery, catId)
     }
 
     // Hotel search is server-side (name=ilike), debounced, only while on the hotels tab.
+    var lastSearchedHotelsQuery by remember { mutableStateOf("") }
     LaunchedEffect(searchQuery, browsingMode) {
         if (browsingMode != BrowsingMode.HOTELS) return@LaunchedEffect
+        if (searchQuery == lastSearchedHotelsQuery) return@LaunchedEffect
         val cityId = selectedCity?.id ?: return@LaunchedEffect
         delay(350)
+        lastSearchedHotelsQuery = searchQuery
         loadHotelsData(cityId, searchQuery)
-    }
-
-    // Products reload immediately on city or category change.
-    // Always scoped to selectedCategoryId (Vegitables by default), never "show everything".
-    LaunchedEffect(selectedCity?.id, selectedCategoryId) {
-        val cityId = selectedCity?.id ?: return@LaunchedEffect
-        val catId = selectedCategoryId ?: return@LaunchedEffect
-        loadGroceryProducts(cityId, searchQuery, catId)
-    }
-
-    // Products reload on search query change (debounced so typing doesn't spam backend).
-    LaunchedEffect(searchQuery) {
-        val cityId = selectedCity?.id ?: return@LaunchedEffect
-        val catId = selectedCategoryId ?: return@LaunchedEffect
-        delay(300)
-        loadGroceryProducts(cityId, searchQuery, catId)
     }
 
     // Handle single-hotel rule conflict dialog
@@ -432,7 +544,18 @@ fun HomeScreen(
                 onCityClick = onCityChangeRequested,
                 onCartClick = onNavigateToCart,
                 onNotificationsClick = onNavigateToNotifications,
-                onSettingsClick = onOpenSettings
+                onSettingsClick = onOpenSettings,
+                onRefresh = {
+                    val cityId = selectedCity?.id
+                    if (cityId != null) {
+                        if (browsingMode == BrowsingMode.GROCERY) {
+                            loadGroceryCategories(forceRefresh = true)
+                            loadGroceryProducts(cityId, searchQuery, selectedCategoryId, reset = true, forceRefresh = true)
+                        } else {
+                            loadHotelsData(cityId, searchQuery, reset = true, forceRefresh = true)
+                        }
+                    }
+                }
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -598,6 +721,7 @@ fun HomeScreen(
                     val filteredProducts = groceryProducts
 
                     LazyVerticalGrid(
+                        state = groceryGridState,
                         columns = GridCells.Fixed(2),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 24.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -733,6 +857,7 @@ fun HomeScreen(
                         }
                     } else {
                         LazyColumn(
+                            state = hotelsListState,
                             contentPadding = PaddingValues(16.dp),
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize()

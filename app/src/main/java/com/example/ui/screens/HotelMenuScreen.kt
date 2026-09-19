@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -64,11 +65,20 @@ fun HotelMenuScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     var vendor by remember { mutableStateOf<Vendor?>(null) }
-    var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
-    var allProducts by remember { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
-    var selectedCategoryId by remember { mutableStateOf<String?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    var categories by remember(vendorId) {
+        mutableStateOf(repository.getCachedHotelCategories(vendorId) ?: emptyList())
+    }
+    var categoryProducts by remember(vendorId) { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
+    var selectedCategoryId by remember(vendorId) {
+        mutableStateOf(categories.firstOrNull()?.id)
+    }
+    var lastLoadedCategoryId by remember(vendorId) { mutableStateOf<String?>(null) }
+    var isLoadingCategories by remember { mutableStateOf(categories.isEmpty()) }
+    var isLoadingProducts by remember { mutableStateOf(false) }
+    var isLoadingMoreProducts by remember { mutableStateOf(false) }
+    var hasMoreProducts by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val menuListState = rememberLazyListState()
 
     val hotelCart by repository.hotelCart.collectAsState()
     var pendingConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
@@ -90,13 +100,13 @@ fun HotelMenuScreen(
         }
     }
 
-    val thisHotelTotalPrice = remember(thisHotelCartItems, freshHotelCartItems, allProducts) {
+    val thisHotelTotalPrice = remember(thisHotelCartItems, freshHotelCartItems, categoryProducts) {
         val freshForThis = freshHotelCartItems.filter { it.cartItem.vendorId == vendorId || it.cartItem.vendorId.isNullOrBlank() }
         if (freshForThis.isNotEmpty()) {
             freshForThis.sumOf { it.totalPrice }
         } else {
             thisHotelCartItems.sumOf { item ->
-                val prod = allProducts.find { it.id == item.productId }
+                val prod = categoryProducts.find { it.id == item.productId }
                 (prod?.effectivePrice ?: 0.0) * item.quantity
             }
         }
@@ -106,58 +116,120 @@ fun HotelMenuScreen(
         onBack()
     }
 
-    fun loadMenu() {
+    fun loadInitialData(forceRefresh: Boolean = false) {
+        if (!forceRefresh && categories.isNotEmpty() && vendor != null) {
+            return
+        }
         coroutineScope.launch {
-            isLoading = true
+            if (categories.isEmpty()) {
+                isLoadingCategories = true
+            }
             errorMessage = null
-            // Rule 4: Parallelize independent requests
             coroutineScope {
                 val vDeferred = async { repository.getVendor(vendorId) }
-                val menuDeferred = async { repository.getHotelMenu(vendorId = vendorId, cityId = cityId) }
+                val cDeferred = async { repository.getHotelCategories(vendorId, forceRefresh = forceRefresh) }
 
                 val vRes = vDeferred.await()
                 if (vRes.isSuccess) {
                     vendor = vRes.getOrNull()
                 }
 
-                val res = menuDeferred.await()
-                if (res.isSuccess) {
-                    val pair = res.getOrNull()!!
-                    categories = pair.first
-                    allProducts = pair.second
-                    if (categories.isNotEmpty() && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
-                        selectedCategoryId = categories.first().id
+                val cRes = cDeferred.await()
+                if (cRes.isSuccess) {
+                    val cats = cRes.getOrNull() ?: emptyList()
+                    categories = cats
+                    if (cats.isNotEmpty() && (selectedCategoryId == null || cats.none { it.id == selectedCategoryId })) {
+                        selectedCategoryId = cats.first().id
                     }
                 } else {
+                    errorMessage = cRes.exceptionOrNull()?.message
+                }
+            }
+            isLoadingCategories = false
+        }
+    }
+
+    // Rule 4: Paginate hotel menu items by 20-30 at a time (default 25)
+    // Rule 3: Prevent redundant re-fetching when already loaded
+    fun loadProductsForCategory(catId: String?, reset: Boolean = true, forceRefresh: Boolean = false) {
+        if (catId == null) return
+
+        // Prevent redundant re-fetch if already loaded
+        if (reset && !forceRefresh && catId == lastLoadedCategoryId && categoryProducts.isNotEmpty()) {
+            return
+        }
+
+        // Check in-memory cache first for instant category switching
+        if (reset && !forceRefresh) {
+            val cached = repository.getCachedHotelProducts(vendorId, cityId, catId)
+            if (cached != null && cached.isNotEmpty()) {
+                categoryProducts = cached
+                lastLoadedCategoryId = catId
+                isLoadingProducts = false
+                hasMoreProducts = cached.size >= 25
+                return
+            }
+        }
+
+        coroutineScope.launch {
+            if (reset) {
+                isLoadingProducts = true
+                errorMessage = null
+            } else {
+                isLoadingMoreProducts = true
+            }
+
+            val offset = if (reset) 0 else categoryProducts.size
+            val res = repository.getHotelProducts(
+                vendorId = vendorId,
+                cityId = cityId,
+                categoryId = catId,
+                limit = 25,
+                offset = offset,
+                forceRefresh = forceRefresh
+            )
+            if (res.isSuccess) {
+                val newItems = res.getOrNull() ?: emptyList()
+                if (reset) {
+                    categoryProducts = newItems
+                    lastLoadedCategoryId = catId
+                } else {
+                    categoryProducts = (categoryProducts + newItems).distinctBy { it.id }
+                }
+                hasMoreProducts = newItems.size >= 25
+            } else {
+                if (reset) {
                     errorMessage = res.exceptionOrNull()?.message
                 }
             }
-            isLoading = false
+            isLoadingProducts = false
+            isLoadingMoreProducts = false
         }
     }
 
     LaunchedEffect(vendorId, cityId) {
-        loadMenu()
+        loadInitialData()
     }
 
-    // Default to first real category when categories load (never unfiltered "All")
-    LaunchedEffect(categories) {
-        if (categories.isNotEmpty() && (selectedCategoryId == null || categories.none { it.id == selectedCategoryId })) {
-            selectedCategoryId = categories.first().id
+    LaunchedEffect(selectedCategoryId) {
+        if (selectedCategoryId != null) {
+            loadProductsForCategory(selectedCategoryId, reset = true)
         }
     }
 
-    // Re-fetch on resume
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, vendorId, cityId) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                loadMenu()
-            }
+    // Auto-paginate on scroll near bottom
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val layoutInfo = menuListState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisible >= totalItems - 3
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore && hasMoreProducts && !isLoadingMoreProducts && !isLoadingProducts) {
+            loadProductsForCategory(selectedCategoryId, reset = false)
         }
     }
 
@@ -221,6 +293,15 @@ fun HotelMenuScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            loadInitialData(forceRefresh = true)
+                            loadProductsForCategory(selectedCategoryId, reset = true, forceRefresh = true)
+                        },
+                        modifier = Modifier.testTag("hotel_menu_refresh_button")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh Menu")
+                    }
                     IconButton(onClick = onNavigateToCart) {
                         val count = hotelCart.sumOf { it.quantity }
                         BadgedBox(
@@ -261,13 +342,16 @@ fun HotelMenuScreen(
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            if (isLoading && allProducts.isEmpty()) {
+            if ((isLoadingCategories || isLoadingProducts) && categoryProducts.isEmpty()) {
                 // Rule 7: Skeleton loading state instead of a spinner
                 OrderListSkeleton(count = 5)
-            } else if (errorMessage != null && allProducts.isEmpty()) {
+            } else if (errorMessage != null && categoryProducts.isEmpty()) {
                 ErrorCard(
                     message = errorMessage!!,
-                    onRetry = { loadMenu() },
+                    onRetry = {
+                        loadInitialData(forceRefresh = true)
+                        loadProductsForCategory(selectedCategoryId, reset = true, forceRefresh = true)
+                    },
                     modifier = Modifier.align(Alignment.Center)
                 )
             } else {
@@ -276,18 +360,12 @@ fun HotelMenuScreen(
                 // Filter items reacting to the selected category (Swiggy-style)
                 // The item grid should always be filtered to whichever category is currently selected - never show all of this hotel's items unfiltered.
                 // Preserving existing sort logic: available+featured first, unavailable last
-                val displayedProducts = remember(allProducts, selectedCategoryId, isHotelActive) {
-                    val catId = selectedCategoryId
-                    if (catId == null) {
-                        emptyList()
-                    } else {
-                        val filtered = allProducts.filter { it.categoryId == catId }
-                        filtered.sortedWith(
-                            compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
-                                .thenByDescending { it.isFeatured }
-                                .thenBy { it.name.lowercase() }
-                        )
-                    }
+                val displayedProducts = remember(categoryProducts, isHotelActive) {
+                    categoryProducts.sortedWith(
+                        compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
+                            .thenByDescending { it.isFeatured }
+                            .thenBy { it.name.lowercase() }
+                    )
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -362,6 +440,7 @@ fun HotelMenuScreen(
                         }
                     } else {
                         LazyColumn(
+                            state = menuListState,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .testTag("hotel_menu_items_list"),
@@ -414,6 +493,35 @@ fun HotelMenuScreen(
                                         )
                                     }
                                 )
+                            }
+
+                            if (hasMoreProducts) {
+                                item(key = "hotel_menu_load_more") {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 12.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isLoadingMoreProducts) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(28.dp),
+                                                strokeWidth = 2.5.dp,
+                                                color = NaturalPrimary
+                                            )
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    loadProductsForCategory(selectedCategoryId, reset = false)
+                                                },
+                                                shape = RoundedCornerShape(20.dp),
+                                                border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.5f))
+                                            ) {
+                                                Text("Load more items", color = NaturalPrimary, style = MaterialTheme.typography.labelLarge)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
