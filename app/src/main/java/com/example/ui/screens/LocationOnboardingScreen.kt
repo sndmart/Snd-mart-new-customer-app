@@ -1347,96 +1347,118 @@ fun LocationOnboardingScreen(
 private fun LocationPermissionRequiredContent(
     onRequestPermission: () -> Unit
 ) {
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .navigationBarsPadding()
     ) {
-        Surface(
-            shape = CircleShape,
-            color = PastelSage,
-            modifier = Modifier.size(96.dp)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = null,
-                    tint = NaturalPrimary,
-                    modifier = Modifier.size(48.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = "Location Permission Required",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Text(
-            text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-            textAlign = TextAlign.Center,
-            lineHeight = 22.sp
-        )
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                PermissionBenefitRow(
-                    icon = Icons.Outlined.Storefront,
-                    title = "Discover Nearby Stores",
-                    desc = "Browse active restaurants, fresh groceries, and food vendors delivering in your vicinity."
-                )
-                PermissionBenefitRow(
-                    icon = Icons.Outlined.NearMe,
-                    title = "Accurate Doorstep Delivery",
-                    desc = "Ensures our delivery partners navigate directly to your house or apartment without calling."
-                )
-                PermissionBenefitRow(
-                    icon = Icons.Outlined.VerifiedUser,
-                    title = "Privacy Guaranteed",
-                    desc = "Your location is only used to service active orders and find nearby hubs."
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(
-            onClick = onRequestPermission,
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .testTag("allow_location_access_button"),
-            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-            shape = RoundedCornerShape(26.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp)
+                .padding(top = 20.dp, bottom = 100.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(10.dp))
+            Surface(
+                shape = CircleShape,
+                color = PastelSage,
+                modifier = Modifier.size(88.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = NaturalPrimary,
+                        modifier = Modifier.size(44.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
             Text(
-                text = "Allow Location Access",
+                text = "Location Permission Required",
+                style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
+                color = TextPrimary,
+                textAlign = TextAlign.Center
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    PermissionBenefitRow(
+                        icon = Icons.Outlined.Storefront,
+                        title = "Discover Nearby Stores",
+                        desc = "Browse active restaurants, fresh groceries, and food vendors delivering in your vicinity."
+                    )
+                    PermissionBenefitRow(
+                        icon = Icons.Outlined.NearMe,
+                        title = "Accurate Doorstep Delivery",
+                        desc = "Ensures our delivery partners navigate directly to your house or apartment without calling."
+                    )
+                    PermissionBenefitRow(
+                        icon = Icons.Outlined.VerifiedUser,
+                        title = "Privacy Guaranteed",
+                        desc = "Your location is only used to service active orders and find nearby hubs."
+                    )
+                }
+            }
+        }
+
+        // Fixed bottom CTA bar ensures button is always visible on all screen sizes
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth(),
+            color = MaterialTheme.colorScheme.background,
+            shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
+            ) {
+                Button(
+                    onClick = onRequestPermission,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("allow_location_access_button"),
+                    colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                    shape = RoundedCornerShape(27.dp),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp)
+                ) {
+                    Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Allow Location Access",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -1450,151 +1472,172 @@ private fun LocationPermissionDeniedContent(
     onTryAgain: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .navigationBarsPadding()
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp)
+                .padding(top = 20.dp, bottom = 140.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = PastelCoral.copy(alpha = 0.5f),
+                modifier = Modifier.size(88.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Outlined.LocationOff,
+                        contentDescription = null,
+                        tint = NaturalBadgeRed,
+                        modifier = Modifier.size(44.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Text(
+                text = "Location Access Required",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = PastelCoral.copy(alpha = 0.25f)),
+                border = BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.3f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = NaturalBadgeRed,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = if (isPermanentlyDenied) {
+                            "Permission was denied. Please open Settings and enable Location permission for Sndmart to continue."
+                        } else {
+                            "Location permission is mandatory to service your doorstep and browse active merchants."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+
+        // Fixed bottom CTA buttons ensures they remain visible regardless of screen height
         Surface(
-            shape = CircleShape,
-            color = PastelCoral.copy(alpha = 0.5f),
-            modifier = Modifier.size(96.dp)
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth(),
+            color = MaterialTheme.colorScheme.background,
+            shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Outlined.LocationOff,
-                    contentDescription = null,
-                    tint = NaturalBadgeRed,
-                    modifier = Modifier.size(48.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = "Location Access Required",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Text(
-            text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-            textAlign = TextAlign.Center,
-            lineHeight = 22.sp
-        )
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = PastelCoral.copy(alpha = 0.25f)),
-            border = BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.3f))
-        ) {
-            Row(
-                modifier = Modifier.padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Info,
-                    contentDescription = null,
-                    tint = NaturalBadgeRed,
-                    modifier = Modifier.size(22.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = if (isPermanentlyDenied) {
-                        "Permission was denied. Please open Settings and enable Location permission for Sndmart to continue."
-                    } else {
-                        "Location permission is mandatory to service your doorstep and browse active merchants."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextPrimary,
-                    lineHeight = 18.sp
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        if (isPermanentlyDenied) {
-            Button(
-                onClick = onOpenSettings,
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
-                    .testTag("open_settings_button"),
-                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                shape = RoundedCornerShape(26.dp)
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
             ) {
-                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Open Settings",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            }
+                if (isPermanentlyDenied) {
+                    Button(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("open_settings_button"),
+                        colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                        shape = RoundedCornerShape(26.dp)
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Open Settings",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                    }
 
-            Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedButton(
-                onClick = onTryAgain,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("try_again_permission_button"),
-                shape = RoundedCornerShape(24.dp)
-            ) {
-                Text(
-                    text = "Try Again",
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-        } else {
-            Button(
-                onClick = onTryAgain,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-                    .testTag("try_again_permission_button"),
-                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                shape = RoundedCornerShape(26.dp)
-            ) {
-                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Try Again",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            }
+                    OutlinedButton(
+                        onClick = onTryAgain,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("try_again_permission_button"),
+                        shape = RoundedCornerShape(24.dp)
+                    ) {
+                        Text(
+                            text = "Try Again",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                } else {
+                    Button(
+                        onClick = onTryAgain,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("try_again_permission_button"),
+                        colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                        shape = RoundedCornerShape(26.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Try Again",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                    }
 
-            Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedButton(
-                onClick = onOpenSettings,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("open_settings_button"),
-                shape = RoundedCornerShape(24.dp)
-            ) {
-                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Open Settings",
-                    fontWeight = FontWeight.SemiBold
-                )
+                    OutlinedButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("open_settings_button"),
+                        shape = RoundedCornerShape(24.dp)
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Open Settings",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             }
         }
     }
