@@ -1031,6 +1031,10 @@ fun AddressPickerDialog(
                                             statusMessage = "Please enter complete address"
                                             return@Button
                                         }
+                                        if (!MapLocationHelper.isValidIndianCoordinate(selectedLatLng.latitude, selectedLatLng.longitude)) {
+                                            statusMessage = "This location looks incorrect. Please adjust the pin and try again."
+                                            return@Button
+                                        }
                                         isSaving = true
                                         statusMessage = null
 

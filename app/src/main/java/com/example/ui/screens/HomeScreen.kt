@@ -423,13 +423,6 @@ fun HomeScreen(
         }
     }
 
-    // Startup / Category loading: Load grocery categories once if not already cached
-    LaunchedEffect(Unit) {
-        if (categories.isEmpty()) {
-            loadGroceryCategories()
-        }
-    }
-
     // Main data loading effect: strictly loads based on active browsingMode and city.
     // Does NOT load Hotels during App/Grocery startup.
     LaunchedEffect(browsingMode, selectedCity?.id, selectedCategoryId) {

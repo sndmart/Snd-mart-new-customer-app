@@ -34,7 +34,15 @@ data class GeocodeAddressResult(
     val postalCode: String? = null
 )
 
+fun isValidIndianCoordinate(lat: Double, lng: Double): Boolean {
+    return lat in 6.0..38.0 && lng in 68.0..98.0
+}
+
 object MapLocationHelper {
+
+    fun isValidIndianCoordinate(lat: Double, lng: Double): Boolean {
+        return com.example.util.isValidIndianCoordinate(lat, lng)
+    }
 
     /**
      * Searches for place predictions via Places SDK if initialized and configured.
@@ -152,6 +160,9 @@ object MapLocationHelper {
     /**
      * Reverse-geocodes (lat, lng) to a human-readable street address.
      */
+    suspend fun reverseGeocode(context: Context, latLng: com.google.android.gms.maps.model.LatLng): GeocodeAddressResult? =
+        reverseGeocode(context, latLng.latitude, latLng.longitude)
+
     suspend fun reverseGeocode(context: Context, lat: Double, lng: Double): GeocodeAddressResult? = withContext(Dispatchers.IO) {
         try {
             val geocoder = Geocoder(context, Locale("en", "IN"))

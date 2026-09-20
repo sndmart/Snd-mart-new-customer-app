@@ -243,8 +243,8 @@ fun AuthScreen(
                     isLoading = false
                     authStep = AuthStep.ENTER_NAME
                 } else if (!existingProfile.cityId.isNullOrBlank()) {
-                    // existingProfile exists AND existingProfile.city_id is already filled in:
-                    // skip STEP 3 and STEP 4 completely — go straight to STEP 6 (Home).
+                    // existingProfile exists AND existingProfile.city_id is already filled in.
+                    // But verify the customer has a confirmed delivery address on file before routing to Home!
                     val cityRes = repository.resolveUserCity(uid)
                     val city = cityRes.getOrNull()
                     if (city != null) {
@@ -252,11 +252,22 @@ fun AuthScreen(
                     }
                     sessionManager.updateProfileInfo(existingProfile)
                     registerFcm(uid)
-                    isLoading = false
-                    onNavigateToHome()
+
+                    val addressesRes = repository.getAddresses(uid)
+                    val addresses = addressesRes.getOrNull().orEmpty()
+                    if (addresses.isNotEmpty()) {
+                        val def = addresses.firstOrNull { it.isDefault } ?: addresses.first()
+                        sessionManager.setHasSavedAddress(true, def.label)
+                        isLoading = false
+                        onNavigateToHome()
+                    } else {
+                        sessionManager.setHasSavedAddress(false)
+                        isLoading = false
+                        onNavigateToCityOnboarding()
+                    }
                 } else {
                     // existingProfile exists BUT existingProfile.city_id is empty/null:
-                    // skip STEP 3, go to STEP 4 (City detection).
+                    sessionManager.setHasSavedAddress(false)
                     sessionManager.updateProfileInfo(existingProfile)
                     registerFcm(uid)
                     isLoading = false

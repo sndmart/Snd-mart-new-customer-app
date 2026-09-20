@@ -1,7 +1,13 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,14 +31,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.location.HighAccuracyLocationManager
 import com.example.data.location.LocationDetector
 import com.example.data.model.City
@@ -44,6 +56,7 @@ import com.example.ui.theme.*
 import com.example.util.MapLocationHelper
 import com.example.util.PhoneUtils
 import com.example.util.PlaceSearchResult
+import com.example.util.isValidIndianCoordinate
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -53,6 +66,39 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val TAG = "LocationOnboarding"
+
+private fun Context.findActivity(): Activity? {
+    var current = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
+}
+
+private fun checkHasLocationPermission(context: Context): Boolean {
+    val fine = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+    val coarse = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.ACCESS_COARSE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+    return fine || coarse
+}
+
+private fun openAppSettings(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", context.packageName, null)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to open settings: ${e.message}", e)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,13 +115,49 @@ fun LocationOnboardingScreen(
     val userName by sessionManager.userName.collectAsState()
     val userPhone by sessionManager.userPhone.collectAsState()
 
+    // Location Permission state
+    var hasLocationPermission by remember { mutableStateOf(checkHasLocationPermission(context)) }
+    var permissionDenied by remember { mutableStateOf(false) }
+    var hasRequestedPermissionOnce by remember { mutableStateOf(false) }
+
+    // Observe lifecycle resume to auto-detect if permission was granted in OS Settings
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val granted = checkHasLocationPermission(context)
+                if (granted) {
+                    hasLocationPermission = true
+                    permissionDenied = false
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (fineGranted || coarseGranted) {
+            hasLocationPermission = true
+            permissionDenied = false
+        } else {
+            hasLocationPermission = false
+            permissionDenied = true
+        }
+    }
+
     // GPS & City Detection state
     var isDetectingGps by remember { mutableStateOf(false) }
     var detectedCity by remember { mutableStateOf<City?>(sessionManager.selectedCity.value) }
     var detectedCityMessage by remember { mutableStateOf<String?>(null) }
     var isUnsupportedArea by remember { mutableStateOf(false) }
-    var permissionDenied by remember { mutableStateOf(false) }
-    var showManualCityPicker by remember { mutableStateOf(detectedCity == null) }
+    var showManualCityPicker by remember { mutableStateOf(false) }
 
     var currentLat by remember { mutableStateOf<Double?>(null) }
     var currentLng by remember { mutableStateOf<Double?>(null) }
@@ -106,17 +188,6 @@ fun LocationOnboardingScreen(
     var searchSuggestions by remember { mutableStateOf<List<PlaceSearchResult>>(emptyList()) }
     var isSearchingPlaces by remember { mutableStateOf(false) }
 
-    val hasLocationPermission = remember(permissionDenied) {
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED ||
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
     // Address Form state
     var selectedLabel by remember { mutableStateOf("Home") }
     var recipientName by remember { mutableStateOf(userName.orEmpty()) }
@@ -127,7 +198,7 @@ fun LocationOnboardingScreen(
     var isSaving by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
 
-    // Active cities list for manual fallback (Step 4)
+    // Active cities list for manual fallback
     var allCitiesList by remember { mutableStateOf<List<City>>(emptyList()) }
     var allCitiesError by remember { mutableStateOf<String?>(null) }
     var isLoadingCities by remember { mutableStateOf(false) }
@@ -139,120 +210,112 @@ fun LocationOnboardingScreen(
         if (res.isSuccess) {
             allCitiesList = res.getOrNull() ?: emptyList()
         } else {
-            val err = res.exceptionOrNull()?.message ?: "Failed to load active cities."
-            Log.e(TAG, "cities select error: $err")
-            allCitiesError = err
+            allCitiesError = res.exceptionOrNull()?.message ?: "Could not load active cities."
         }
     }
 
-    LaunchedEffect(userName, userPhone) {
+    // Keep name/phone synced if session loads late
+    LaunchedEffect(userName) {
         if (recipientName.isBlank() && !userName.isNullOrBlank()) {
             recipientName = userName!!
         }
+    }
+    LaunchedEffect(userPhone) {
         if (phone.isBlank() && !userPhone.isNullOrBlank()) {
             phone = userPhone!!
         }
     }
 
-    // Reverse geocode a pin coordinate and update the address field (respecting manual edits)
-    fun triggerPinReverseGeocode(targetLatLng: LatLng) {
-        pinLatLng = targetLatLng
+    // Debounced Places autocomplete search
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.length < 3) {
+            searchSuggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(350)
+        isSearchingPlaces = true
+        try {
+            searchSuggestions = MapLocationHelper.searchPlaces(context, searchQuery)
+        } catch (e: Exception) {
+            Log.e(TAG, "Places search failed: ${e.message}", e)
+        } finally {
+            isSearchingPlaces = false
+        }
+    }
+
+    // Reverse geocode helper when pin moves
+    fun triggerPinReverseGeocode(latLng: LatLng) {
+        pinLatLng = latLng
         coroutineScope.launch {
             isReverseGeocoding = true
-            val geo = MapLocationHelper.reverseGeocode(context, targetLatLng.latitude, targetLatLng.longitude)
-            isReverseGeocoding = false
-            if (geo != null) {
-                // Rule: Do not overwrite a manually-edited field if the customer already typed something different
-                if (!hasUserManuallyEditedAddress || addressLine.isBlank() || addressLine == lastReverseGeocodedAddress) {
-                    addressLine = geo.addressLine
-                    lastReverseGeocodedAddress = geo.addressLine
+            try {
+                val geocoded = MapLocationHelper.reverseGeocode(context, latLng.latitude, latLng.longitude)
+                if (geocoded != null) {
+                    lastReverseGeocodedAddress = geocoded.addressLine
+                    if (!hasUserManuallyEditedAddress || addressLine.isBlank()) {
+                        addressLine = geocoded.addressLine
+                    }
+                    if (landmark.isBlank() && !geocoded.featureName.isNullOrBlank() && geocoded.featureName != geocoded.subLocality) {
+                        landmark = geocoded.featureName
+                    }
                 }
-                if (landmark.isBlank() && !geo.subLocality.isNullOrBlank()) {
-                    landmark = geo.subLocality
-                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Reverse geocoding error: ${e.message}", e)
+            } finally {
+                isReverseGeocoding = false
             }
         }
     }
 
-    // Listen for marker drag-end to reverse-geocode new position
-    var wasDragging by remember { mutableStateOf(false) }
+    // Listen to marker drag events to update the pin position
     LaunchedEffect(markerState.isDragging) {
-        if (wasDragging && !markerState.isDragging) {
-            val finalPos = markerState.position
-            triggerPinReverseGeocode(finalPos)
-        }
-        wasDragging = markerState.isDragging
-    }
-
-    // Debounced Places Autocomplete search
-    LaunchedEffect(searchQuery) {
-        if (searchQuery.trim().length >= 2) {
-            delay(350)
-            isSearchingPlaces = true
-            val results = MapLocationHelper.searchPlaces(context, searchQuery.trim())
-            searchSuggestions = results
-            isSearchingPlaces = false
-        } else {
-            searchSuggestions = emptyList()
-            isSearchingPlaces = false
+        if (!markerState.isDragging) {
+            triggerPinReverseGeocode(markerState.position)
         }
     }
 
-    // Keep name/phone in sync when sessionManager updates
-    LaunchedEffect(userName, userPhone) {
-        if (recipientName.isBlank() && !userName.isNullOrBlank()) {
-            recipientName = userName!!
-        }
-        if (phone.isBlank() && !userPhone.isNullOrBlank()) {
-            phone = userPhone!!
-        }
-    }
-
-    // Function to run GPS detection & call RPC
+    // GPS & City Detection function - ONLY run once location permission is granted
     fun performGpsDetection() {
         coroutineScope.launch {
             isDetectingGps = true
             isUnsupportedArea = false
-            permissionDenied = false
             formError = null
 
             try {
-                val coords = HighAccuracyLocationManager.getAccurateGpsLocation(context) {}
+                val coords = HighAccuracyLocationManager.getAccurateGpsLocation(context) { /* status updates */ }
                 val lat = coords?.latitude
                 val lng = coords?.longitude
 
-                if (lat != null && lng != null) {
-                    currentLat = lat
-                    currentLng = lng
-                    val detectedPos = LatLng(lat, lng)
-                    pinLatLng = detectedPos
-                    markerState.position = detectedPos
-                    coroutineScope.launch {
-                        cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(detectedPos, 16.8f))
-                    }
+                // Fall back to city center ONLY as a map starting point, NEVER as a saved value
+                val defaultLat = detectedCity?.centerLat ?: 15.7667
+                val defaultLng = detectedCity?.centerLng ?: 76.7583
+                val initialLat = lat ?: defaultLat
+                val initialLng = lng ?: defaultLng
+                val initialPos = LatLng(initialLat, initialLng)
 
-                    // Call POST /rest/v1/rpc/find_city_for_location
+                currentLat = lat
+                currentLng = lng
+                pinLatLng = initialPos
+                markerState.position = initialPos
+
+                coroutineScope.launch {
+                    cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(initialPos, 16.8f))
+                }
+
+                if (lat != null && lng != null) {
+                    // Call backend RPC to identify serviceable city
                     val rpcResult = repository.findCityForLocation(lat, lng)
                     val rpcCity = rpcResult.getOrNull()
 
                     if (rpcResult.isSuccess && rpcCity != null) {
                         detectedCity = rpcCity
                         detectedCityMessage = "Detected: ${rpcCity.name}"
-                        showManualCityPicker = false
                         sessionManager.setSelectedCity(rpcCity)
                         val uid = userId
                         if (!uid.isNullOrBlank()) {
                             try { repository.updateProfileCityId(uid, rpcCity.id) } catch (_: Exception) {}
                         }
-
-                        // Reverse-geocode street address to pre-fill address line and pin
-                        triggerPinReverseGeocode(detectedPos)
-                        val (street, locality) = locationDetector.getFullAddressFromCoordinates(lat, lng)
-                        detectedLocalityText = locality ?: street
-                    } else if (rpcResult.isSuccess && rpcCity == null) {
-                        // Not serviceable via RPC
-                        isUnsupportedArea = true
-                        triggerPinReverseGeocode(detectedPos)
+                        triggerPinReverseGeocode(initialPos)
                         val (street, locality) = locationDetector.getFullAddressFromCoordinates(lat, lng)
                         detectedLocalityText = locality ?: street
                     } else {
@@ -264,70 +327,54 @@ fun LocationOnboardingScreen(
                         if (matched != null) {
                             detectedCity = matched
                             detectedCityMessage = "Detected: ${matched.name}"
-                            showManualCityPicker = false
                             sessionManager.setSelectedCity(matched)
                             val uid = userId
                             if (!uid.isNullOrBlank()) {
                                 try { repository.updateProfileCityId(uid, matched.id) } catch (_: Exception) {}
                             }
-                            triggerPinReverseGeocode(detectedPos)
+                            triggerPinReverseGeocode(initialPos)
                         } else {
                             isUnsupportedArea = true
                             detectedLocalityText = locality ?: street
+                            triggerPinReverseGeocode(initialPos)
                         }
                     }
                 } else {
-                    // Coordinates unavailable
-                    isUnsupportedArea = true
+                    // Fallback to initial map position
+                    triggerPinReverseGeocode(initialPos)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "GPS detection exception", e)
-                isUnsupportedArea = true
+                val fallbackPos = LatLng(detectedCity?.centerLat ?: 15.7667, detectedCity?.centerLng ?: 76.7583)
+                pinLatLng = fallbackPos
+                markerState.position = fallbackPos
+                triggerPinReverseGeocode(fallbackPos)
             } finally {
                 isDetectingGps = false
             }
         }
     }
 
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
-        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        if (fineGranted || coarseGranted) {
+    // Auto-detect GPS once permission is granted
+    LaunchedEffect(hasLocationPermission) {
+        if (hasLocationPermission) {
             performGpsDetection()
-        } else {
-            permissionDenied = true
-            isDetectingGps = false
         }
     }
 
-    // Auto-request location permission or detect GPS on screen open
-    LaunchedEffect(Unit) {
-        val hasFine = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (hasFine || hasCoarse) {
-            performGpsDetection()
-        } else {
-            locationPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                )
-            )
-        }
-    }
-
-    // Save address handler - saves the FINAL pin position (after customer adjustment)
+    // Step 4: Save address handler - ONLY called on manual "Confirm Location" tap with validation
     fun handleSaveAddress() {
-        val city = detectedCity
+        // Final pin position after customer dragging or searching
+        val finalLat = pinLatLng?.latitude ?: markerState.position.latitude
+        val finalLng = pinLatLng?.longitude ?: markerState.position.longitude
+
+        // Mandatory coordinate validation check (Step 4)
+        if (!isValidIndianCoordinate(finalLat, finalLng)) {
+            formError = "This location looks incorrect. Please adjust the pin and try again."
+            return
+        }
+
+        val city = detectedCity ?: allCitiesList.firstOrNull()
         if (city == null) {
             formError = "Please select or detect your delivery city first."
             return
@@ -344,10 +391,6 @@ fun LocationOnboardingScreen(
             formError = "Please enter your complete street address or house number."
             return
         }
-
-        // Final pin position after dragging or searching
-        val finalLat = pinLatLng?.latitude ?: markerState.position.latitude
-        val finalLng = pinLatLng?.longitude ?: markerState.position.longitude
 
         val uid = userId
         if (uid.isNullOrBlank()) {
@@ -393,7 +436,6 @@ fun LocationOnboardingScreen(
                     return@launch
                 }
 
-                // Both succeeded!
                 val saved = saveRes.getOrNull()
                 if (saved?.id != null) {
                     try { repository.setDefaultAddress(uid, saved.id) } catch (_: Exception) {}
@@ -415,7 +457,7 @@ fun LocationOnboardingScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = "Set Delivery Location",
+                        text = if (!hasLocationPermission) "Location Required" else "Set Delivery Location",
                         fontWeight = FontWeight.Bold
                     )
                 },
@@ -425,775 +467,831 @@ fun LocationOnboardingScreen(
             )
         }
     ) { paddingValues ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.background)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Hero Icon / Header Card
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = PastelSage,
-                modifier = Modifier.size(72.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = null,
-                        tint = NaturalPrimary,
-                        modifier = Modifier.size(38.dp)
+            if (!hasLocationPermission) {
+                if (!permissionDenied) {
+                    // STEP 1: Dedicated Location Permission Required Screen
+                    LocationPermissionRequiredContent(
+                        onRequestPermission = {
+                            hasRequestedPermissionOnce = true
+                            locationPermissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        }
+                    )
+                } else {
+                    // STEP 2: Blocking Permission Denied Screen
+                    val activity = context.findActivity()
+                    val isPermanentlyDenied = hasRequestedPermissionOnce && activity != null &&
+                        !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION) &&
+                        !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+                    LocationPermissionDeniedContent(
+                        isPermanentlyDenied = isPermanentlyDenied,
+                        onTryAgain = {
+                            locationPermissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        },
+                        onOpenSettings = {
+                            openAppSettings(context)
+                        }
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = "Where should we deliver?",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.ExtraBold,
-                color = NaturalPrimary
-            )
-            Text(
-                text = "Confirm your delivery city and address to view fresh groceries & hotel menus in your area.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                lineHeight = 18.sp
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // GPS Detecting Indicator
-            if (isDetectingGps) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceVariantLight),
-                    border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.3f))
+            } else {
+                // STEP 3 & STEP 4: Full Interactive Map Pin Screen
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    // Header Card
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = PastelSage,
+                        modifier = Modifier.size(72.dp)
                     ) {
-                        CircularProgressIndicator(
-                            color = NaturalPrimary,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column {
-                            Text(
-                                text = "Detecting your location via GPS...",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "Locating nearest Sndmart delivery hub",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = null,
+                                tint = NaturalPrimary,
+                                modifier = Modifier.size(38.dp)
                             )
                         }
                     }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            // Success Detection Pill
-            if (!isDetectingGps && detectedCity != null && detectedCityMessage != null) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = PastelSage.copy(alpha = 0.5f)),
-                    border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.4f))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = NaturalPrimary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = detectedCityMessage ?: "City Detected",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = NaturalPrimary
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = "Where should we deliver?",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = NaturalPrimary
+                    )
+                    Text(
+                        text = "Confirm your delivery location and pin your exact doorstep to view fresh groceries & hotel menus in your area.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        lineHeight = 18.sp,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // GPS Detecting Indicator
+                    if (isDetectingGps) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = SurfaceVariantLight),
+                            border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.3f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    color = NaturalPrimary,
+                                    strokeWidth = 3.dp,
+                                    modifier = Modifier.size(24.dp)
                                 )
-                                if (detectedLocalityText != null) {
+                                Spacer(modifier = Modifier.width(14.dp))
+                                Column {
                                     Text(
-                                        text = detectedLocalityText!!,
+                                        text = "Detecting your location via GPS...",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Locating nearest Sndmart delivery hub",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = TextSecondary
                                     )
                                 }
                             }
                         }
-                        TextButton(
-                            onClick = { showManualCityPicker = true },
-                            modifier = Modifier.testTag("change_detected_city_button")
-                        ) {
-                            Text("Change", fontWeight = FontWeight.SemiBold, color = NaturalPrimary)
-                        }
+                        Spacer(modifier = Modifier.height(16.dp))
                     }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            // Unsupported Area State
-            if (isUnsupportedArea) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = PastelCoral.copy(alpha = 0.4f)),
-                    border = BorderStroke(1.dp, TangerineOrange.copy(alpha = 0.4f))
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Outlined.Info,
-                                contentDescription = null,
-                                tint = TangerineOrange,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "We're not available in your area yet",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Sndmart is actively serving select hubs. You can pick an active city manually to explore and order.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = { showManualCityPicker = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.testTag("pick_different_city_button")
+                    // Success Detection Pill
+                    if (!isDetectingGps && detectedCity != null && detectedCityMessage != null) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = PastelSage.copy(alpha = 0.5f)),
+                            border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.4f))
                         ) {
-                            Icon(Icons.Default.LocationCity, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Pick a Different City")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = NaturalPrimary,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column {
+                                        Text(
+                                            text = detectedCityMessage ?: "City Detected",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = NaturalPrimary
+                                        )
+                                        if (detectedLocalityText != null) {
+                                            Text(
+                                                text = detectedLocalityText!!,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = TextSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                                TextButton(
+                                    onClick = { showManualCityPicker = true },
+                                    modifier = Modifier.testTag("change_detected_city_button")
+                                ) {
+                                    Text("Change", fontWeight = FontWeight.SemiBold, color = NaturalPrimary)
+                                }
+                            }
                         }
+                        Spacer(modifier = Modifier.height(16.dp))
                     }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            // Direct list of active cities when city is not yet detected/selected
-            if (detectedCity == null && !isDetectingGps) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("active_cities_selection_card"),
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.LocationCity,
-                                contentDescription = null,
-                                tint = NaturalPrimary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
+                    // Unsupported Area Warning
+                    if (isUnsupportedArea) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = PastelCoral.copy(alpha = 0.4f)),
+                            border = BorderStroke(1.dp, TangerineOrange.copy(alpha = 0.4f))
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Info,
+                                        contentDescription = null,
+                                        tint = TangerineOrange,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "We're not available in your area yet",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = if (permissionDenied) "Location Permission Denied" else "Select Your Delivery City",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary
-                                )
-                                Text(
-                                    text = "Tap your city below to proceed to address confirmation",
+                                    text = "Sndmart is actively serving select hubs. You can pick an active city manually to explore and order.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = TextSecondary
                                 )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        if (allCitiesError != null) {
-                            Text(
-                                text = allCitiesError!!,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(bottom = 8.dp)
-                            )
-                        }
-
-                        if (isLoadingCities) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 20.dp),
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(28.dp), color = NaturalPrimary)
-                            }
-                        } else {
-                            allCitiesList.forEach { city ->
-                                Surface(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .clickable {
-                                            detectedCity = city
-                                            detectedCityMessage = "Selected: ${city.name}"
-                                            isUnsupportedArea = false
-                                            permissionDenied = false
-                                            sessionManager.setSelectedCity(city)
-                                            val uid = userId
-                                            if (!uid.isNullOrBlank()) {
-                                                coroutineScope.launch {
-                                                    val res = repository.updateProfileCityId(uid, city.id)
-                                                    if (res.isFailure) {
-                                                        Log.e(TAG, "profiles update city_id error: ${res.exceptionOrNull()?.message}")
-                                                    }
-                                                }
-                                            }
-                                            val newCenter = if (city.centerLat != null && city.centerLng != null) {
-                                                LatLng(city.centerLat!!, city.centerLng!!)
-                                            } else {
-                                                LatLng(15.7667, 76.7583)
-                                            }
-                                            pinLatLng = newCenter
-                                            markerState.position = newCenter
-                                            coroutineScope.launch {
-                                                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(newCenter, 16.5f))
-                                            }
-                                            triggerPinReverseGeocode(newCenter)
-                                        }
-                                        .testTag("city_item_${city.id}"),
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = { showManualCityPicker = true },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
                                     shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                                    modifier = Modifier.testTag("pick_different_city_button")
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Place,
-                                            contentDescription = null,
-                                            tint = NaturalPrimary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Text(
-                                            text = city.name,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TextPrimary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Icon(
-                                            imageVector = Icons.Default.ArrowForwardIos,
-                                            contentDescription = null,
-                                            tint = TextSecondary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
+                                    Icon(Icons.Default.LocationCity, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Pick a Different City")
                                 }
                             }
                         }
+                        Spacer(modifier = Modifier.height(16.dp))
                     }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            // --- STEP 2 PART 4: SAVE DELIVERY ADDRESS FORM ---
-            AnimatedVisibility(visible = detectedCity != null) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(18.dp)
-                    ) {
-                        Text(
-                            text = "Confirm Delivery Address",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                        Text(
-                            text = "Pin your exact doorstep & confirm delivery details",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // --- 5. SEARCH BOX WITH PLACES AUTOCOMPLETE ---
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = null,
-                                    tint = NaturalPrimary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                OutlinedTextField(
-                                    value = searchQuery,
-                                    onValueChange = { searchQuery = it },
-                                    placeholder = {
-                                        Text(
-                                            "Search for area, street...",
-                                            fontSize = 13.sp,
-                                            color = TextSecondary
-                                        )
-                                    },
-                                    singleLine = true,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("places_search_input"),
-                                    colors = TextFieldDefaults.colors(
-                                        focusedContainerColor = Color.Transparent,
-                                        unfocusedContainerColor = Color.Transparent,
-                                        disabledContainerColor = Color.Transparent,
-                                        focusedIndicatorColor = Color.Transparent,
-                                        unfocusedIndicatorColor = Color.Transparent
-                                    )
-                                )
-                                if (isSearchingPlaces) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = NaturalPrimary
-                                    )
-                                } else if (searchQuery.isNotBlank()) {
-                                    IconButton(
-                                        onClick = {
-                                            searchQuery = ""
-                                            searchSuggestions = emptyList()
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Clear",
-                                            modifier = Modifier.size(16.dp),
-                                            tint = TextSecondary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Autocomplete Suggestions Dropdown
-                        AnimatedVisibility(visible = searchSuggestions.isNotEmpty()) {
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                shadowElevation = 6.dp,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 180.dp)
-                                    .padding(top = 4.dp)
-                            ) {
-                                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                                    searchSuggestions.forEachIndexed { index, item ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    searchQuery = item.primaryText
-                                                    searchSuggestions = emptyList()
-                                                    coroutineScope.launch {
-                                                        isSearchingPlaces = true
-                                                        val target = MapLocationHelper.fetchPlaceLatLng(context, item)
-                                                        isSearchingPlaces = false
-                                                        if (target != null) {
-                                                            markerState.position = target
-                                                            cameraPositionState.animate(
-                                                                CameraUpdateFactory.newLatLngZoom(target, 17f)
-                                                            )
-                                                            triggerPinReverseGeocode(target)
-                                                        }
-                                                    }
-                                                }
-                                                .padding(horizontal = 14.dp, vertical = 10.dp)
-                                                .testTag("places_suggestion_item_$index"),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(
-                                                Icons.Default.Place,
-                                                contentDescription = null,
-                                                tint = NaturalPrimary,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(10.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = item.primaryText,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = TextPrimary
-                                                )
-                                                if (item.secondaryText.isNotBlank()) {
-                                                    Text(
-                                                        text = item.secondaryText,
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = TextSecondary,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        if (index < searchSuggestions.size - 1) {
-                                            HorizontalDivider(
-                                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
-                                                thickness = 0.5.dp
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // --- 1-3. INTERACTIVE MAP VIEW WITH DRAGGABLE PIN ---
-                        Box(
+                    // Active cities selection if city is not yet set
+                    if (detectedCity == null && !isDetectingGps) {
+                        Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(270.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                                .testTag("active_cities_selection_card"),
+                            shape = RoundedCornerShape(18.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ) {
-                            GoogleMap(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .testTag("delivery_pin_map"),
-                                cameraPositionState = cameraPositionState,
-                                onMapClick = { clickedLatLng ->
-                                    markerState.position = clickedLatLng
-                                    triggerPinReverseGeocode(clickedLatLng)
-                                },
-                                uiSettings = remember {
-                                    MapUiSettings(
-                                        zoomControlsEnabled = false,
-                                        myLocationButtonEnabled = false,
-                                        compassEnabled = true,
-                                        scrollGesturesEnabled = true,
-                                        zoomGesturesEnabled = true,
-                                        rotationGesturesEnabled = false,
-                                        tiltGesturesEnabled = false
-                                    )
-                                },
-                                properties = remember(hasLocationPermission) {
-                                    MapProperties(isMyLocationEnabled = hasLocationPermission)
-                                }
-                            ) {
-                                Marker(
-                                    state = markerState,
-                                    title = "Delivery Location",
-                                    snippet = "Drag to adjust pin to your exact doorstep",
-                                    draggable = true,
-                                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
-                                )
-                            }
-
-                            // Top instruction pill
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                                shadowElevation = 3.dp,
-                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
-                                modifier = Modifier
-                                    .align(Alignment.TopCenter)
-                                    .padding(top = 10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
-                                        imageVector = Icons.Default.TouchApp,
+                                        imageVector = Icons.Default.LocationCity,
                                         contentDescription = null,
                                         tint = NaturalPrimary,
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(24.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Drag pin or tap map to set exact spot",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = NaturalPrimary
-                                    )
-                                }
-                            }
-
-                            // Re-center to GPS Button
-                            if (currentLat != null && currentLng != null) {
-                                FloatingActionButton(
-                                    onClick = {
-                                        val gpsPos = LatLng(currentLat!!, currentLng!!)
-                                        markerState.position = gpsPos
-                                        coroutineScope.launch {
-                                            cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(gpsPos, 17f))
-                                        }
-                                        triggerPinReverseGeocode(gpsPos)
-                                    },
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .padding(10.dp)
-                                        .size(40.dp)
-                                        .testTag("recenter_gps_button"),
-                                    shape = CircleShape,
-                                    containerColor = MaterialTheme.colorScheme.surface,
-                                    contentColor = NaturalPrimary,
-                                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.MyLocation,
-                                        contentDescription = "Center to my GPS",
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-
-                            // Live Geocoding Loading Indicator
-                            if (isReverseGeocoding) {
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-                                    shadowElevation = 4.dp,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .padding(10.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(12.dp),
-                                            strokeWidth = 2.dp,
-                                            color = NaturalPrimary
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column {
                                         Text(
-                                            text = "Detecting address...",
-                                            style = MaterialTheme.typography.labelSmall,
+                                            text = "Select Your Delivery City",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold,
                                             color = TextPrimary
                                         )
+                                        Text(
+                                            text = "Tap your city below to proceed to address confirmation",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                if (allCitiesError != null) {
+                                    Text(
+                                        text = allCitiesError!!,
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.padding(bottom = 8.dp)
+                                    )
+                                }
+
+                                if (isLoadingCities) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 20.dp),
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        CircularProgressIndicator(modifier = Modifier.size(28.dp), color = NaturalPrimary)
+                                    }
+                                } else {
+                                    allCitiesList.forEach { city ->
+                                        Surface(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    detectedCity = city
+                                                    detectedCityMessage = "Selected: ${city.name}"
+                                                    isUnsupportedArea = false
+                                                    sessionManager.setSelectedCity(city)
+                                                    val uid = userId
+                                                    if (!uid.isNullOrBlank()) {
+                                                        coroutineScope.launch {
+                                                            val res = repository.updateProfileCityId(uid, city.id)
+                                                            if (res.isFailure) {
+                                                                Log.e(TAG, "profiles update city_id error: ${res.exceptionOrNull()?.message}")
+                                                            }
+                                                        }
+                                                    }
+                                                    val newCenter = if (city.centerLat != null && city.centerLng != null) {
+                                                        LatLng(city.centerLat!!, city.centerLng!!)
+                                                    } else {
+                                                        LatLng(15.7667, 76.7583)
+                                                    }
+                                                    pinLatLng = newCenter
+                                                    markerState.position = newCenter
+                                                    coroutineScope.launch {
+                                                        cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(newCenter, 16.5f))
+                                                    }
+                                                    triggerPinReverseGeocode(newCenter)
+                                                }
+                                                .testTag("city_item_${city.id}"),
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Place,
+                                                    contentDescription = null,
+                                                    tint = NaturalPrimary,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Text(
+                                                    text = city.name,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = TextPrimary,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Icon(
+                                                    imageVector = Icons.Default.ArrowForwardIos,
+                                                    contentDescription = null,
+                                                    tint = TextSecondary,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
 
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        if (formError != null) {
-                            ErrorCard(message = formError!!, onRetry = { formError = null })
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
-
-                        // Address Label Selector (Home, Work, Other)
-                        Text(
-                            text = "SAVE AS",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    // --- STEP 3 & 4: MAP PIN & CONFIRM DELIVERY ADDRESS FORM ---
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(18.dp)
                         ) {
-                            listOf(
-                                Triple("Home", Icons.Default.Home, "label_chip_home"),
-                                Triple("Work", Icons.Default.Work, "label_chip_work"),
-                                Triple("Other", Icons.Default.Place, "label_chip_other")
-                            ).forEach { (label, icon, testTag) ->
-                                val isSelected = selectedLabel == label
-                                FilterChip(
-                                    selected = isSelected,
-                                    onClick = { selectedLabel = label },
-                                    label = { Text(label, fontWeight = FontWeight.SemiBold) },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = icon,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = NaturalPrimary,
-                                        selectedLabelColor = Color.White,
-                                        selectedLeadingIconColor = Color.White
-                                    ),
-                                    modifier = Modifier.testTag(testTag)
-                                )
-                            }
-                        }
+                            Text(
+                                text = "Confirm Delivery Address",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Pin your exact doorstep & confirm delivery details",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
-                        // Recipient Name
-                        OutlinedTextField(
-                            value = recipientName,
-                            onValueChange = { recipientName = it },
-                            label = { Text("Recipient Name *") },
-                            placeholder = { Text("e.g. John Doe") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("address_name_input"),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Phone Number
-                        OutlinedTextField(
-                            value = phone,
-                            onValueChange = { phone = it },
-                            label = { Text("Contact Phone *") },
-                            placeholder = { Text("e.g. +91 9876543210") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("address_phone_input"),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Address Line
-                        OutlinedTextField(
-                            value = addressLine,
-                            onValueChange = { input ->
-                                addressLine = input
-                                if (input != lastReverseGeocodedAddress) {
-                                    hasUserManuallyEditedAddress = true
-                                }
-                            },
-                            label = { Text("House / Flat / Street / Area *") },
-                            placeholder = { Text("e.g. Flat 302, Green Meadows, Main Road") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("address_line_input"),
-                            minLines = 2,
-                            maxLines = 3,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Landmark (Optional)
-                        OutlinedTextField(
-                            value = landmark,
-                            onValueChange = { landmark = it },
-                            label = { Text("Landmark (Optional)") },
-                            placeholder = { Text("e.g. Near Bus Stand, Opp. SBI Bank") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("address_landmark_input"),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        if (formError != null) {
+                            // Places Autocomplete Search Box
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = PastelCoral.copy(alpha = 0.5f),
-                                border = BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.4f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 14.dp)
-                                    .testTag("form_error_card")
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.ErrorOutline,
-                                        contentDescription = "Error",
-                                        tint = NaturalBadgeRed,
+                                        Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = NaturalPrimary,
                                         modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = formError!!,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error,
-                                        fontWeight = FontWeight.Medium
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = { searchQuery = it },
+                                        placeholder = {
+                                            Text(
+                                                "Search for area, street...",
+                                                fontSize = 13.sp,
+                                                color = TextSecondary
+                                            )
+                                        },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("places_search_input"),
+                                        colors = TextFieldDefaults.colors(
+                                            focusedContainerColor = Color.Transparent,
+                                            unfocusedContainerColor = Color.Transparent,
+                                            disabledContainerColor = Color.Transparent,
+                                            focusedIndicatorColor = Color.Transparent,
+                                            unfocusedIndicatorColor = Color.Transparent
+                                        )
                                     )
+                                    if (isSearchingPlaces) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = NaturalPrimary
+                                        )
+                                    } else if (searchQuery.isNotBlank()) {
+                                        IconButton(
+                                            onClick = {
+                                                searchQuery = ""
+                                                searchSuggestions = emptyList()
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Close,
+                                                contentDescription = "Clear",
+                                                modifier = Modifier.size(16.dp),
+                                                tint = TextSecondary
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        // Confirm & Continue Button
-                        Button(
-                            onClick = { handleSaveAddress() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("confirm_delivery_address_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                            enabled = !isSaving,
-                            shape = RoundedCornerShape(25.dp)
-                        ) {
-                            if (isSaving) {
-                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
-                            } else {
-                                Text(
-                                    text = "Confirm & Continue",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
+                            // Autocomplete Suggestions Dropdown
+                            AnimatedVisibility(visible = searchSuggestions.isNotEmpty()) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shadowElevation = 6.dp,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 180.dp)
+                                        .padding(top = 4.dp)
+                                ) {
+                                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                        searchSuggestions.forEachIndexed { index, item ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        searchQuery = item.primaryText
+                                                        searchSuggestions = emptyList()
+                                                        coroutineScope.launch {
+                                                            isSearchingPlaces = true
+                                                            val target = MapLocationHelper.fetchPlaceLatLng(context, item)
+                                                            isSearchingPlaces = false
+                                                            if (target != null) {
+                                                                pinLatLng = target
+                                                                markerState.position = target
+                                                                cameraPositionState.animate(
+                                                                    CameraUpdateFactory.newLatLngZoom(target, 17f)
+                                                                )
+                                                                triggerPinReverseGeocode(target)
+                                                            }
+                                                        }
+                                                    }
+                                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                                                    .testTag("places_suggestion_item_$index"),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Place,
+                                                    contentDescription = null,
+                                                    tint = NaturalPrimary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = item.primaryText,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = TextPrimary
+                                                    )
+                                                    if (item.secondaryText.isNotBlank()) {
+                                                        Text(
+                                                            text = item.secondaryText,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = TextSecondary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            if (index < searchSuggestions.size - 1) {
+                                                HorizontalDivider(
+                                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                                    thickness = 0.5.dp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Step 3: Interactive Google Map with Draggable Pin
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(270.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                            ) {
+                                GoogleMap(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .testTag("delivery_pin_map"),
+                                    cameraPositionState = cameraPositionState,
+                                    onMapClick = { clickedLatLng ->
+                                        pinLatLng = clickedLatLng
+                                        markerState.position = clickedLatLng
+                                        triggerPinReverseGeocode(clickedLatLng)
+                                    },
+                                    uiSettings = remember {
+                                        MapUiSettings(
+                                            zoomControlsEnabled = false,
+                                            myLocationButtonEnabled = false,
+                                            compassEnabled = true,
+                                            scrollGesturesEnabled = true,
+                                            zoomGesturesEnabled = true,
+                                            rotationGesturesEnabled = false,
+                                            tiltGesturesEnabled = false
+                                        )
+                                    },
+                                    properties = remember(hasLocationPermission) {
+                                        MapProperties(isMyLocationEnabled = hasLocationPermission)
+                                    }
+                                ) {
+                                    Marker(
+                                        state = markerState,
+                                        title = "Delivery Location",
+                                        snippet = "Drag to adjust pin to your exact doorstep",
+                                        draggable = true,
+                                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                                    )
+                                }
+
+                                // Top instruction pill
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                                    shadowElevation = 3.dp,
+                                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                                    modifier = Modifier
+                                        .align(Alignment.TopCenter)
+                                        .padding(top = 10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.TouchApp,
+                                            contentDescription = null,
+                                            tint = NaturalPrimary,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Drag pin or tap map to set exact spot",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = NaturalPrimary
+                                        )
+                                    }
+                                }
+
+                                // Re-center to GPS Button
+                                if (currentLat != null && currentLng != null) {
+                                    FloatingActionButton(
+                                        onClick = {
+                                            val gpsPos = LatLng(currentLat!!, currentLng!!)
+                                            pinLatLng = gpsPos
+                                            markerState.position = gpsPos
+                                            coroutineScope.launch {
+                                                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(gpsPos, 17f))
+                                            }
+                                            triggerPinReverseGeocode(gpsPos)
+                                        },
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .padding(10.dp)
+                                            .size(40.dp)
+                                            .testTag("recenter_gps_button"),
+                                        shape = CircleShape,
+                                        containerColor = MaterialTheme.colorScheme.surface,
+                                        contentColor = NaturalPrimary,
+                                        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MyLocation,
+                                            contentDescription = "Center to my GPS",
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+
+                                // Live Geocoding Loading Indicator
+                                if (isReverseGeocoding) {
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                                        shadowElevation = 4.dp,
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp),
+                                                strokeWidth = 2.dp,
+                                                color = NaturalPrimary
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Detecting address...",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = TextPrimary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            if (formError != null) {
+                                ErrorCard(
+                                    message = formError!!,
+                                    onRetry = { formError = null },
+                                    modifier = Modifier.testTag("form_error_card")
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+
+                            // Address Label Selector
+                            Text(
+                                text = "SAVE AS",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                listOf(
+                                    Triple("Home", Icons.Default.Home, "label_chip_home"),
+                                    Triple("Work", Icons.Default.Work, "label_chip_work"),
+                                    Triple("Other", Icons.Default.Place, "label_chip_other")
+                                ).forEach { (label, icon, testTag) ->
+                                    val isSelected = selectedLabel == label
+                                    Surface(
+                                        shape = RoundedCornerShape(20.dp),
+                                        color = if (isSelected) NaturalPrimary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isSelected) NaturalPrimary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                        ),
+                                        modifier = Modifier
+                                            .clickable { selectedLabel = label }
+                                            .testTag(testTag)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                icon,
+                                                contentDescription = null,
+                                                tint = if (isSelected) Color.White else TextSecondary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = label,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                fontSize = 13.sp,
+                                                color = if (isSelected) Color.White else TextPrimary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Recipient Name
+                            OutlinedTextField(
+                                value = recipientName,
+                                onValueChange = { recipientName = it },
+                                label = { Text("Recipient Name *") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Person, contentDescription = null, tint = NaturalPrimary)
+                                },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("address_name_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = NaturalPrimary,
+                                    focusedLabelColor = NaturalPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Contact Phone Number
+                            OutlinedTextField(
+                                value = phone,
+                                onValueChange = { phone = it },
+                                label = { Text("Contact Phone *") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Phone, contentDescription = null, tint = NaturalPrimary)
+                                },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("address_phone_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = NaturalPrimary,
+                                    focusedLabelColor = NaturalPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Complete Street Address
+                            OutlinedTextField(
+                                value = addressLine,
+                                onValueChange = {
+                                    addressLine = it
+                                    hasUserManuallyEditedAddress = true
+                                },
+                                label = { Text("House / Flat / Street / Area *") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.LocationOn, contentDescription = null, tint = NaturalPrimary)
+                                },
+                                minLines = 2,
+                                maxLines = 4,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("address_line_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = NaturalPrimary,
+                                    focusedLabelColor = NaturalPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Landmark (Optional)
+                            OutlinedTextField(
+                                value = landmark,
+                                onValueChange = { landmark = it },
+                                label = { Text("Landmark (Optional)") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Apartment, contentDescription = null, tint = NaturalPrimary)
+                                },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("address_landmark_input"),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = NaturalPrimary,
+                                    focusedLabelColor = NaturalPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+
+                            Spacer(modifier = Modifier.height(20.dp))
+
+                            // Step 4: "Confirm Location" Button
+                            Button(
+                                onClick = { handleSaveAddress() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                                    .testTag("confirm_delivery_address_button")
+                                    .testTag("confirm_location_button"),
+                                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                                enabled = !isSaving,
+                                shape = RoundedCornerShape(25.dp)
+                            ) {
+                                if (isSaving) {
+                                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                                } else {
+                                    Text(
+                                        text = "Confirm Location",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                }
                             }
                         }
                     }
@@ -1239,5 +1337,308 @@ fun LocationOnboardingScreen(
                 performGpsDetection()
             }
         )
+    }
+}
+
+/**
+ * Step 1 - Dedicated Location Permission Required Screen
+ */
+@Composable
+private fun LocationPermissionRequiredContent(
+    onRequestPermission: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = PastelSage,
+            modifier = Modifier.size(96.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = null,
+                    tint = NaturalPrimary,
+                    modifier = Modifier.size(48.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Location Permission Required",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text(
+            text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp
+        )
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                PermissionBenefitRow(
+                    icon = Icons.Outlined.Storefront,
+                    title = "Discover Nearby Stores",
+                    desc = "Browse active restaurants, fresh groceries, and food vendors delivering in your vicinity."
+                )
+                PermissionBenefitRow(
+                    icon = Icons.Outlined.NearMe,
+                    title = "Accurate Doorstep Delivery",
+                    desc = "Ensures our delivery partners navigate directly to your house or apartment without calling."
+                )
+                PermissionBenefitRow(
+                    icon = Icons.Outlined.VerifiedUser,
+                    title = "Privacy Guaranteed",
+                    desc = "Your location is only used to service active orders and find nearby hubs."
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Button(
+            onClick = onRequestPermission,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .testTag("allow_location_access_button"),
+            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+            shape = RoundedCornerShape(26.dp)
+        ) {
+            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "Allow Location Access",
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp
+            )
+        }
+    }
+}
+
+/**
+ * Step 2 - Blocking Permission Denied Screen
+ */
+@Composable
+private fun LocationPermissionDeniedContent(
+    isPermanentlyDenied: Boolean,
+    onTryAgain: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = PastelCoral.copy(alpha = 0.5f),
+            modifier = Modifier.size(96.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Outlined.LocationOff,
+                    contentDescription = null,
+                    tint = NaturalBadgeRed,
+                    modifier = Modifier.size(48.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Location Access Required",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text(
+            text = "Sndmart needs your location to show nearby hotels and groceries, and for accurate delivery. This is required to continue.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = PastelCoral.copy(alpha = 0.25f)),
+            border = BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.3f))
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = NaturalBadgeRed,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = if (isPermanentlyDenied) {
+                        "Permission was denied. Please open Settings and enable Location permission for Sndmart to continue."
+                    } else {
+                        "Location permission is mandatory to service your doorstep and browse active merchants."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextPrimary,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        if (isPermanentlyDenied) {
+            Button(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("open_settings_button"),
+                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Open Settings",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedButton(
+                onClick = onTryAgain,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("try_again_permission_button"),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Text(
+                    text = "Try Again",
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        } else {
+            Button(
+                onClick = onTryAgain,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("try_again_permission_button"),
+                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Try Again",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedButton(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("open_settings_button"),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Open Settings",
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionBenefitRow(
+    icon: ImageVector,
+    title: String,
+    desc: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = PastelSage,
+            modifier = Modifier.size(36.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = NaturalPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = desc,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                lineHeight = 16.sp
+            )
+        }
     }
 }
