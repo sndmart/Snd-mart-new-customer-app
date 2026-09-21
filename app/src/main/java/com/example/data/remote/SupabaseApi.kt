@@ -125,6 +125,13 @@ interface SupabaseApi {
         @Query("select") select: String = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time"
     ): Response<List<Vendor>>
 
+    @GET("rest/v1/vendor_operating_hours")
+    suspend fun getVendorOperatingHours(
+        @Query("vendor_id") vendorId: String,
+        @Query("is_active") isActive: String? = "eq.true",
+        @Query("select") select: String = "id,vendor_id,start_time,end_time,day_of_week,is_active"
+    ): Response<List<OperatingSlot>>
+
     // --- PRODUCTS ---
 
     @GET("rest/v1/products")

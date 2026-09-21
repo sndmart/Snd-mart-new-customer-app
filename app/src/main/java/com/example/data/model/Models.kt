@@ -63,6 +63,16 @@ data class Vendor(
 }
 
 @JsonClass(generateAdapter = true)
+data class OperatingSlot(
+    val id: String = "",
+    @Json(name = "vendor_id") val vendorId: String = "",
+    @Json(name = "start_time") val startTime: String = "",
+    @Json(name = "end_time") val endTime: String = "",
+    @Json(name = "day_of_week") val dayOfWeek: Int? = null,
+    @Json(name = "is_active") val isActive: Boolean = true
+)
+
+@JsonClass(generateAdapter = true)
 data class ProductVariantCityStock(
     val price: Double = 0.0,
     @Json(name = "stock_qty") val stockQty: Int? = 0,
@@ -94,6 +104,8 @@ data class Product(
     @Json(name = "is_available") val isAvailable: Boolean = true,
     @Json(name = "is_active") val isActive: Boolean = true,
     @Json(name = "is_featured") val isFeatured: Boolean? = false,
+    @Json(name = "available_from") val availableFrom: String? = null,
+    @Json(name = "available_until") val availableUntil: String? = null,
     @Json(name = "product_variants") val productVariants: List<ProductVariant>? = null
 )
 
@@ -147,7 +159,30 @@ data class ResolvedProduct(
         }
 
     val isHotelItemAvailable: Boolean
-        get() = baseProduct.isActive && effectiveIsAvailable
+        get() {
+            if (!baseProduct.isActive || !effectiveIsAvailable) return false
+            // Item-specific availability window check (e.g. breakfast only 07:00-11:00)
+            if (!baseProduct.availableFrom.isNullOrBlank() && !baseProduct.availableUntil.isNullOrBlank()) {
+                return com.example.util.isVendorWithinOperatingHours(
+                    baseProduct.availableFrom,
+                    baseProduct.availableUntil
+                )
+            }
+            return true
+        }
+
+    fun isHotelItemAvailable(vendorSlots: List<OperatingSlot>): Boolean {
+        if (!baseProduct.isActive || !effectiveIsAvailable) return false
+        // Priority 1: Item-specific availability window if configured
+        if (!baseProduct.availableFrom.isNullOrBlank() && !baseProduct.availableUntil.isNullOrBlank()) {
+            return com.example.util.isVendorWithinOperatingHours(
+                baseProduct.availableFrom,
+                baseProduct.availableUntil
+            )
+        }
+        // Priority 2: Vendor-level operating slots fallback
+        return com.example.util.isWithinAnySlot(vendorSlots)
+    }
 }
 
 @JsonClass(generateAdapter = true)

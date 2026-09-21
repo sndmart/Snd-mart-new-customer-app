@@ -874,6 +874,26 @@ class SndmartRepository(
         }
     }
 
+    suspend fun getVendorOperatingSlots(vendorId: String): Result<List<OperatingSlot>> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.success(emptyList())
+        }
+        return try {
+            val response = api.getVendorOperatingHours(
+                vendorId = "eq.$vendorId",
+                isActive = "eq.true"
+            )
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.success(emptyList())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception fetching vendor operating hours: ${e.message}", e)
+            Result.success(emptyList())
+        }
+    }
+
     fun resolveProductVariants(prod: Product, cityId: String): List<ResolvedVariant> {
         val variants = prod.productVariants?.filter { it.isActive } ?: return emptyList()
         val list = mutableListOf<ResolvedVariant>()

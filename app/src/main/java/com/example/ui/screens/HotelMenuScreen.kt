@@ -37,12 +37,14 @@ import com.example.data.repository.AddToCartResult
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.*
 import com.example.ui.theme.*
+import com.example.util.isVendorWithinOperatingHours
+import com.example.util.isWithinAnySlot
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
-private fun getHotelMenuItemTier(prod: ResolvedProduct, isHotelActive: Boolean): Int {
-    val isAvail = isHotelActive && prod.isHotelItemAvailable
+private fun getHotelMenuItemTier(prod: ResolvedProduct, isHotelActive: Boolean, vendorSlots: List<OperatingSlot> = emptyList()): Int {
+    val isAvail = isHotelActive && prod.isHotelItemAvailable(vendorSlots)
     return when {
         isAvail && prod.isFeatured -> 0
         isAvail -> 1
@@ -65,6 +67,24 @@ fun HotelMenuScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     var vendor by remember { mutableStateOf<Vendor?>(null) }
+    var operatingSlots by remember { mutableStateOf<List<OperatingSlot>>(emptyList()) }
+    val effectiveSlots by remember(operatingSlots, vendor) {
+        derivedStateOf {
+            if (operatingSlots.isNotEmpty()) {
+                operatingSlots
+            } else if (!vendor?.openingTime.isNullOrBlank() && !vendor?.closingTime.isNullOrBlank()) {
+                listOf(
+                    OperatingSlot(
+                        vendorId = vendor?.id ?: "",
+                        startTime = vendor!!.openingTime!!,
+                        endTime = vendor!!.closingTime!!
+                    )
+                )
+            } else {
+                emptyList()
+            }
+        }
+    }
     var categories by remember(vendorId) {
         mutableStateOf(repository.getCachedHotelCategories(vendorId) ?: emptyList())
     }
@@ -127,11 +147,17 @@ fun HotelMenuScreen(
             errorMessage = null
             coroutineScope {
                 val vDeferred = async { repository.getVendor(vendorId) }
+                val sDeferred = async { repository.getVendorOperatingSlots(vendorId) }
                 val cDeferred = async { repository.getHotelCategories(vendorId, forceRefresh = forceRefresh) }
 
                 val vRes = vDeferred.await()
                 if (vRes.isSuccess) {
                     vendor = vRes.getOrNull()
+                }
+
+                val sRes = sDeferred.await()
+                if (sRes.isSuccess) {
+                    operatingSlots = sRes.getOrNull() ?: emptyList()
                 }
 
                 val cRes = cDeferred.await()
@@ -356,20 +382,22 @@ fun HotelMenuScreen(
                 )
             } else {
                 val isHotelActive = vendor?.isActive ?: true
+                val isWithinHours = isWithinAnySlot(effectiveSlots)
+                val isHotelOpen = isHotelActive && isWithinHours
 
                 // Filter items reacting to the selected category (Swiggy-style)
                 // The item grid should always be filtered to whichever category is currently selected - never show all of this hotel's items unfiltered.
                 // Preserving existing sort logic: available+featured first, unavailable last
-                val displayedProducts = remember(categoryProducts, isHotelActive) {
+                val displayedProducts = remember(categoryProducts, isHotelOpen, effectiveSlots) {
                     categoryProducts.sortedWith(
-                        compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelActive) }
+                        compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelOpen, effectiveSlots) }
                             .thenByDescending { it.isFeatured }
                             .thenBy { it.name.lowercase() }
                     )
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
-                    if (!isHotelActive) {
+                    if (!isHotelOpen) {
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -389,8 +417,18 @@ fun HotelMenuScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
+                                val bannerMessage = when {
+                                    !isWithinHours && operatingSlots.isNotEmpty() ->
+                                        "This hotel is currently closed outside operating hours (${operatingSlots.joinToString(", ") { "${it.startTime}-${it.endTime}" }}). Ordering is unavailable."
+                                    !isWithinHours && !vendor?.openingTime.isNullOrBlank() ->
+                                        "This hotel is currently closed. Opens at ${vendor?.openingTime}."
+                                    !isWithinHours ->
+                                        "This hotel is currently closed outside operating hours. Ordering is unavailable."
+                                    else ->
+                                        "This restaurant is currently closed. You can browse the menu, but ordering is unavailable."
+                                }
                                 Text(
-                                    text = "This restaurant is currently closed. You can browse the menu, but ordering is unavailable.",
+                                    text = bannerMessage,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Medium,
                                     color = NaturalBadgeRed
@@ -470,7 +508,8 @@ fun HotelMenuScreen(
                                 MenuItemCard(
                                     product = product,
                                     quantityInCart = qty,
-                                    isHotelActive = isHotelActive,
+                                    isHotelActive = isHotelOpen,
+                                    vendorSlots = effectiveSlots,
                                     onIncrease = {
                                         val res = repository.addToCart(
                                             productId = product.id,
@@ -656,10 +695,11 @@ fun MenuItemCard(
     product: ResolvedProduct,
     quantityInCart: Int,
     isHotelActive: Boolean = true,
+    vendorSlots: List<OperatingSlot> = emptyList(),
     onIncrease: () -> Unit,
     onDecrease: () -> Unit
 ) {
-    val isAvailable = isHotelActive && product.isHotelItemAvailable
+    val isAvailable = isHotelActive && product.isHotelItemAvailable(vendorSlots)
 
     Card(
         modifier = Modifier
@@ -751,6 +791,15 @@ fun MenuItemCard(
                         color = TextMuted,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (!product.baseProduct.availableFrom.isNullOrBlank() && !product.baseProduct.availableUntil.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Available ${product.baseProduct.availableFrom} - ${product.baseProduct.availableUntil}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isAvailable) NaturalPrimary else NaturalBadgeRed,
+                        maxLines = 1
                     )
                 }
                 Spacer(modifier = Modifier.height(4.dp))

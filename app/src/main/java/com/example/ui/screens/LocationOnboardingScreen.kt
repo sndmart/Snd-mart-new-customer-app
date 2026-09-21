@@ -1424,6 +1424,28 @@ private fun LocationPermissionRequiredContent(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // Primary In-Content CTA Button (ensures prominence and visibility directly in flow)
+            Button(
+                onClick = onRequestPermission,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp)
+                    .testTag("allow_location_access_inline_button"),
+                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                shape = RoundedCornerShape(27.dp),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp)
+            ) {
+                Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Allow Location Access",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            }
         }
 
         // Fixed bottom CTA bar ensures button is always visible on all screen sizes

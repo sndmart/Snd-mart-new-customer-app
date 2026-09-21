@@ -30,16 +30,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.data.model.*
 import com.example.data.repository.AddToCartResult
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.*
 import com.example.ui.theme.*
+import com.example.util.isVendorWithinOperatingHours
+import com.example.util.isWithinAnySlot
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -855,6 +860,17 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
+                            if (BuildConfig.DEBUG) {
+                                item {
+                                    Text(
+                                        text = "DEBUG: App time = ${java.time.LocalTime.now()} | Zone = ${java.time.ZoneId.systemDefault()}",
+                                        color = Color.Red,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(4.dp)
+                                    )
+                                }
+                            }
+
                             items(filteredHotels, key = { it.id }) { hotel ->
                                 HotelCard(
                                     vendor = hotel,
@@ -1296,7 +1312,23 @@ fun HotelCard(
     repository: SndmartRepository,
     onClick: () -> Unit
 ) {
-    val isOpen = vendor.isOpen && vendor.isActive
+    var operatingSlots by remember(vendor.id) { mutableStateOf<List<OperatingSlot>>(emptyList()) }
+    LaunchedEffect(vendor.id) {
+        val slotsRes = repository.getVendorOperatingSlots(vendor.id)
+        if (slotsRes.isSuccess) {
+            operatingSlots = slotsRes.getOrNull() ?: emptyList()
+        }
+    }
+
+    val isWithinHours = if (operatingSlots.isNotEmpty()) {
+        isWithinAnySlot(operatingSlots)
+    } else {
+        isVendorWithinOperatingHours(vendor.openingTime, vendor.closingTime)
+    }
+    val isOpen = vendor.isOpen && vendor.isActive && isWithinHours
+    val grayscaleFilter = remember {
+        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+    }
 
     // Average rating from vendor_reviews (computed client-side). Fetched per card so
     // only visible hotels make the call; 0.0 means "no reviews yet".
@@ -1308,12 +1340,12 @@ fun HotelCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .alpha(if (vendor.isActive) 1f else 0.65f)
+            .alpha(if (isOpen) 1f else 0.75f)
             .clickable { onClick() }
             .testTag("hotel_card_${vendor.id}"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (vendor.isActive) MaterialTheme.colorScheme.surface
+            containerColor = if (isOpen) MaterialTheme.colorScheme.surface
             else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
         ),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
@@ -1328,9 +1360,8 @@ fun HotelCard(
                 ProductImage(
                     url = vendor.bannerUrl,
                     contentDescription = vendor.name,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .alpha(if (vendor.isActive) 1f else 0.7f)
+                    modifier = Modifier.fillMaxSize(),
+                    colorFilter = if (isOpen) null else grayscaleFilter
                 )
                 // Status chips
                 Row(
@@ -1430,7 +1461,15 @@ fun HotelCard(
                     }
                 }
 
-                if (!vendor.openingTime.isNullOrBlank() && !vendor.closingTime.isNullOrBlank()) {
+                val hoursText = when {
+                    operatingSlots.isNotEmpty() ->
+                        "Hours: " + operatingSlots.joinToString(", ") { "${it.startTime}-${it.endTime}" }
+                    !vendor.openingTime.isNullOrBlank() && !vendor.closingTime.isNullOrBlank() ->
+                        "Hours: ${vendor.openingTime} - ${vendor.closingTime}"
+                    else -> null
+                }
+
+                if (hoursText != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
@@ -1441,9 +1480,11 @@ fun HotelCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Hours: ${vendor.openingTime} - ${vendor.closingTime}",
+                            text = hoursText,
                             style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
