@@ -19,7 +19,7 @@ class SndmartApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        ensureWebViewCacheDirs()
+        cleanupCorruptedWebViewCache()
         sessionManager = UserSessionManager(this)
         createNotificationChannel()
         initFirebaseSafety()
@@ -43,13 +43,28 @@ class SndmartApp : Application(), ImageLoaderFactory {
             .build()
     }
 
-    private fun ensureWebViewCacheDirs() {
+    /**
+     * Cleans up any incomplete or corrupted WebView cache directories left by previous
+     * runs or crashes. If an HTTP Cache or Code Cache directory exists without Chromium's
+     * index file ("the-real-index"), Chromium's simple_file_enumerator attempts and fails
+     * to reconstruct the index from disk, logging errors. Purging incomplete cache directories
+     * allows Chromium to initialize cleanly with a fresh index structure.
+     */
+    private fun cleanupCorruptedWebViewCache() {
         try {
-            val codeCacheDir = File(cacheDir, "WebView/Default/HTTP Cache/Code Cache")
-            File(codeCacheDir, "js").mkdirs()
-            File(codeCacheDir, "wasm").mkdirs()
+            val webViewDir = File(cacheDir, "WebView")
+            if (webViewDir.exists()) {
+                val httpCacheDir = File(webViewDir, "Default/HTTP Cache")
+                if (httpCacheDir.exists()) {
+                    val indexFile = File(httpCacheDir, "index-dir/the-real-index")
+                    val codeCacheDir = File(httpCacheDir, "Code Cache")
+                    if (!indexFile.exists() || (codeCacheDir.exists() && !File(codeCacheDir, "js/index-dir/the-real-index").exists())) {
+                        httpCacheDir.deleteRecursively()
+                    }
+                }
+            }
         } catch (e: Throwable) {
-            // Safe fallback if directory creation is restricted
+            // Safe fallback if directory operations fail
         }
     }
 

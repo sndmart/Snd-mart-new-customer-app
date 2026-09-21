@@ -860,17 +860,6 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            if (BuildConfig.DEBUG) {
-                                item {
-                                    Text(
-                                        text = "DEBUG: App time = ${java.time.LocalTime.now()} | Zone = ${java.time.ZoneId.systemDefault()}",
-                                        color = Color.Red,
-                                        fontSize = 10.sp,
-                                        modifier = Modifier.padding(4.dp)
-                                    )
-                                }
-                            }
-
                             items(filteredHotels, key = { it.id }) { hotel ->
                                 HotelCard(
                                     vendor = hotel,
