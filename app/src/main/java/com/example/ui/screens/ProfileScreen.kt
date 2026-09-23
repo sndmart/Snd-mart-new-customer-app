@@ -260,6 +260,13 @@ fun ProfileScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        coroutineScope.launch {
+                            try {
+                                repository.signOut()
+                            } catch (e: Exception) {
+                                // Ignore or log
+                            }
+                        }
                         sessionManager.logout()
                         showLogoutDialog = false
                         onLogoutSuccess()

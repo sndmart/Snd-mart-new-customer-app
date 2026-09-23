@@ -253,6 +253,11 @@ fun AuthScreen(
                     sessionManager.updateProfileInfo(existingProfile)
                     registerFcm(uid)
 
+                    // Right after successful login/registration, clear and re-sync cart as safety net
+                    repository.clearCartDirectly(isHotel = true)
+                    repository.clearCartDirectly(isHotel = false)
+                    repository.syncCartFromBackend()
+
                     val addressesRes = repository.getAddresses(uid)
                     val addresses = addressesRes.getOrNull().orEmpty()
                     if (addresses.isNotEmpty()) {
@@ -321,6 +326,11 @@ fun AuthScreen(
                     phone = phone,
                     expiresInSeconds = verifiedExpiresIn
                 )
+                // Right after successful registration, clear and re-sync cart
+                repository.clearCartDirectly(isHotel = true)
+                repository.clearCartDirectly(isHotel = false)
+                repository.syncCartFromBackend()
+
                 sessionManager.updateProfileInfo(insertRes.getOrNull() ?: profileToInsert)
                 registerFcm(uid)
                 isLoading = false

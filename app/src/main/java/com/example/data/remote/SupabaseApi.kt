@@ -216,6 +216,12 @@ interface SupabaseApi {
     ): Response<List<CustomerAddress>>
 
     @GET("rest/v1/customer_addresses")
+    suspend fun getCustomerAddresses(
+        @Query("user_id") userId: String,
+        @Query("order") order: String = "is_default.desc,id.desc"
+    ): Response<List<CustomerAddress>>
+
+    @GET("rest/v1/customer_addresses")
     suspend fun getAddressById(
         @Query("id") idQuery: String
     ): Response<List<CustomerAddress>>
@@ -246,6 +252,12 @@ interface SupabaseApi {
         @Query("is_active") isActive: String = "eq.true",
         @Query("order") order: String = "start_time.asc"
     ): Response<List<DeliverySlot>>
+
+    @GET("rest/v1/city_delivery_settings")
+    suspend fun getCityDeliverySettings(
+        @Query("city_id") cityId: String,
+        @Query("is_active") isActive: String = "eq.true"
+    ): Response<List<CityDeliverySettings>>
 
     @GET("rest/v1/express_delivery_settings")
     suspend fun getExpressDeliverySettings(
@@ -291,7 +303,8 @@ interface SupabaseApi {
         @Query("select") select: String? = null,
         @Query("order") order: String = "placed_at.desc",
         @Query("limit") limit: Int? = null,
-        @Query("offset") offset: Int? = null
+        @Query("offset") offset: Int? = null,
+        @Query("status") status: String? = null
     ): Response<List<Order>>
 
     @GET("rest/v1/orders")

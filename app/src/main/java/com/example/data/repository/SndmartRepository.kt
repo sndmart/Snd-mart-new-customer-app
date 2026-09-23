@@ -551,9 +551,19 @@ class SndmartRepository(
      * Signs out the current session or other sessions on Supabase backend.
      */
     suspend fun signOut(scope: String? = null): Result<Unit> {
-        if (!SupabaseClient.isKeyConfigured()) return Result.success(Unit)
+        if (!SupabaseClient.isKeyConfigured()) {
+            clearCartDirectly(isHotel = true)
+            clearCartDirectly(isHotel = false)
+            return Result.success(Unit)
+        }
         return try {
             val res = api.signOut(scope = scope)
+
+            // Always clear in-memory cart state on sign-out, regardless of API result,
+            // so no leftover items can leak into the next user's session on this device.
+            clearCartDirectly(isHotel = true)
+            clearCartDirectly(isHotel = false)
+
             if (res.isSuccessful) {
                 Result.success(Unit)
             } else {
@@ -561,6 +571,10 @@ class SndmartRepository(
             }
         } catch (e: Exception) {
             Log.w(TAG, "Exception during signOut(scope=$scope): ${e.message}")
+            // Still clear cart state even if the network call itself failed -
+            // the user is leaving this session either way.
+            clearCartDirectly(isHotel = true)
+            clearCartDirectly(isHotel = false)
             Result.failure(e)
         }
     }
@@ -1633,6 +1647,28 @@ class SndmartRepository(
         }
     }
 
+    suspend fun getFreeDeliveryThreshold(cityId: String): Double? {
+        val cleanCityId = cityId.removePrefix("eq.")
+        if (!SupabaseClient.isKeyConfigured()) {
+            return 99.0
+        }
+        return try {
+            val response = api.getCityDeliverySettings(cityId = "eq.$cleanCityId")
+            if (response.isSuccessful && !response.body().isNullOrEmpty()) {
+                val settings = response.body()!!.firstOrNull { it.isActive != false } ?: response.body()!!.first()
+                settings.freeDeliveryMinOrderAmount ?: settings.freeDeliveryMinOrder
+            } else {
+                // Fallback to express delivery settings if city_delivery_settings is not configured
+                val express = getExpressDeliverySettings(cleanCityId).getOrNull()
+                express?.freeDeliveryMinOrder
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception getting free delivery threshold: ${e.message}")
+            val express = getExpressDeliverySettings(cleanCityId).getOrNull()
+            express?.freeDeliveryMinOrder
+        }
+    }
+
     suspend fun getExpressDeliverySettings(cityId: String): Result<ExpressDeliverySettings?> {
         if (!SupabaseClient.isKeyConfigured()) {
             return Result.success(null)
@@ -1965,6 +2001,15 @@ class SndmartRepository(
     }
 
     // --- CUSTOMER ADDRESSES ---
+    suspend fun getCustomerAddressCount(userId: String): Result<Int> {
+        return try {
+            val response = api.getCustomerAddresses(userId = "eq.$userId")
+            if (response.isSuccessful) Result.success(response.body()?.size ?: 0) else Result.failure(Exception("Failed to check addresses"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun getAddresses(userId: String): Result<List<CustomerAddress>> {
         return try {
             val response = api.getAddresses(userId = "eq.$userId")
@@ -2423,6 +2468,19 @@ class SndmartRepository(
 
     suspend fun getMyOrders(userId: String, limit: Int? = null, offset: Int? = null): Result<List<Order>> =
         getOrders(userId, limit, offset)
+
+    suspend fun getCompletedOrderCount(userId: String): Result<Int> {
+        return try {
+            val response = api.getOrders(customerId = "eq.$userId", status = "eq.delivered")
+            if (response.isSuccessful) {
+                Result.success(response.body()?.size ?: 0)
+            } else {
+                Result.failure(Exception("Failed to load order count: ${response.code()} ${response.message()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     suspend fun getOrderById(orderId: String): Result<Order> {
         return try {

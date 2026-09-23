@@ -295,21 +295,29 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                             sessionManager.setSelectedCity(profileCity)
                         }
                     }
-                    if (!sessionManager.hasSavedAddress()) {
-                        val addresses = repository.getAddresses(currentUserId).getOrNull().orEmpty()
+                    val addresses = repository.getAddresses(currentUserId).getOrNull()
+                    if (addresses != null) {
                         if (addresses.isNotEmpty()) {
                             val def = addresses.firstOrNull { it.isDefault } ?: addresses.first()
                             sessionManager.setHasSavedAddress(true, def.label)
+                        } else {
+                            sessionManager.setHasSavedAddress(false)
                         }
                     }
                 }
 
                 // Rehydrate the user's cart from the cart_items table at session start.
-                // Only when the in-memory cart is empty, so items added this session
-                // are never clobbered.
+                // Clear any leftover memory state before syncing for the current user.
                 LaunchedEffect(userId) {
-                    userId ?: return@LaunchedEffect
-                    if (repository.getCartCount() == 0) {
+                    val uid = userId
+                    if (uid == null) {
+                        // User is logged out: clear memory carts immediately
+                        repository.clearCartDirectly(isHotel = true)
+                        repository.clearCartDirectly(isHotel = false)
+                    } else {
+                        // Fresh user session: clear memory cart and load server cart
+                        repository.clearCartDirectly(isHotel = true)
+                        repository.clearCartDirectly(isHotel = false)
                         repository.syncCartFromBackend()
                     }
                 }
@@ -615,19 +623,56 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                     }
                 ) { innerPadding ->
                     Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-                        val startDestination = remember {
-                            if (!sessionManager.hasSavedSession()) {
-                                Screen.Auth.route
-                            } else if (sessionManager.selectedCity.value != null && sessionManager.hasSavedAddress()) {
-                                Screen.Home.route
+                        var verifiedHasAddress by remember { mutableStateOf<Boolean?>(null) }
+
+                        LaunchedEffect(Unit) {
+                            if (sessionManager.hasSavedSession()) {
+                                val currentUserId = sessionManager.getUserId()
+                                if (currentUserId != null) {
+                                    val result = repository.getCustomerAddressCount(currentUserId)
+                                    val actuallyHasAddress = (result.getOrNull() ?: 0) > 0
+                                    if (actuallyHasAddress != sessionManager.hasSavedAddress()) {
+                                        sessionManager.setHasSavedAddress(actuallyHasAddress)
+                                    }
+                                    verifiedHasAddress = actuallyHasAddress
+                                } else {
+                                    verifiedHasAddress = sessionManager.hasSavedAddress()
+                                }
                             } else {
-                                Screen.LocationOnboarding.route
+                                verifiedHasAddress = false
                             }
                         }
-                        NavHost(
-                            navController = navController,
-                            startDestination = startDestination
-                        ) {
+
+                        if (sessionManager.hasSavedSession() && verifiedHasAddress == null) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize(),
+                                color = MaterialTheme.colorScheme.background
+                            ) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = NaturalPrimary,
+                                        modifier = Modifier.size(36.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                }
+                            }
+                        } else {
+                            val startDestination = remember(verifiedHasAddress) {
+                                if (!sessionManager.hasSavedSession()) {
+                                    Screen.Auth.route
+                                } else if (sessionManager.selectedCity.value != null && (verifiedHasAddress ?: sessionManager.hasSavedAddress())) {
+                                    Screen.Home.route
+                                } else {
+                                    Screen.LocationOnboarding.route
+                                }
+                            }
+                            NavHost(
+                                navController = navController,
+                                startDestination = startDestination
+                            ) {
                             composable(Screen.Home.route) {
                                 val defaultAddressLabel by sessionManager.defaultAddressLabel.collectAsState()
                                 HomeScreen(
@@ -966,9 +1011,9 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
             }
         }
     }
-}
-}
-
+        }
+    }
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -1005,3 +1050,4 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
         RazorpayPaymentManager.onPaymentError(code, response, paymentData)
     }
 }
+

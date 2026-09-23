@@ -304,6 +304,15 @@ data class DeliverySlot(
 }
 
 @JsonClass(generateAdapter = true)
+data class CityDeliverySettings(
+    val id: String? = null,
+    @Json(name = "city_id") val cityId: String = "",
+    @Json(name = "free_delivery_min_order_amount") val freeDeliveryMinOrderAmount: Double? = null,
+    @Json(name = "free_delivery_min_order") val freeDeliveryMinOrder: Double? = null,
+    @Json(name = "is_active") val isActive: Boolean? = true
+)
+
+@JsonClass(generateAdapter = true)
 data class ExpressDeliverySettings(
     val id: String? = null,
     @Json(name = "city_id") val cityId: String = "",

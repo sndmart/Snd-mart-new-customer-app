@@ -301,6 +301,9 @@ class UserSessionManager(context: Context) {
         private const val KEY_HAS_SAVED_ADDRESS = "has_saved_address"
         private const val KEY_DEFAULT_ADDRESS_LABEL = "default_address_label"
         private const val KEY_DEVICE_ID = "sndmart_device_id"
+        private const val KEY_RATING_POPUP_SHOWN_COUNT = "rating_popup_shown_count"
+        private const val KEY_RATING_POPUP_DISMISSED_FOREVER = "rating_popup_dismissed_forever"
+        private const val KEY_HAS_RATED = "has_rated_app"
     }
 
     /**
@@ -317,4 +320,23 @@ class UserSessionManager(context: Context) {
     }
 
     fun getDeviceId(): String = getOrCreateDeviceId()
+
+    fun shouldShowRatingPopup(completedOrderCount: Int): Boolean {
+        if (prefs.getBoolean(KEY_HAS_RATED, false)) return false
+        if (prefs.getBoolean(KEY_RATING_POPUP_DISMISSED_FOREVER, false)) return false
+        val timesShown = prefs.getInt(KEY_RATING_POPUP_SHOWN_COUNT, 0)
+        return completedOrderCount >= 3 && (completedOrderCount - 3) % 5 == 0 && timesShown < 3
+    }
+
+    fun recordRatingPopupShown() {
+        prefs.edit().putInt(KEY_RATING_POPUP_SHOWN_COUNT, prefs.getInt(KEY_RATING_POPUP_SHOWN_COUNT, 0) + 1).apply()
+    }
+
+    fun recordRatingPopupDismissedForever() {
+        prefs.edit().putBoolean(KEY_RATING_POPUP_DISMISSED_FOREVER, true).apply()
+    }
+
+    fun recordUserRated() {
+        prefs.edit().putBoolean(KEY_HAS_RATED, true).apply()
+    }
 }

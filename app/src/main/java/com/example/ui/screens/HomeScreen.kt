@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
@@ -32,11 +35,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.BuildConfig
 import com.example.data.model.*
 import com.example.data.repository.AddToCartResult
@@ -177,6 +184,55 @@ fun HomeScreen(
     // Conflict Dialog state
     var pendingHotelConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
     var variantPickerProduct by remember { mutableStateOf<ResolvedProduct?>(null) }
+
+    // Free Delivery Threshold for flash banner
+    var freeDeliveryThreshold by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(selectedCity?.id) {
+        val cid = selectedCity?.id
+        if (cid != null) {
+            freeDeliveryThreshold = repository.getFreeDeliveryThreshold(cid)
+        } else {
+            freeDeliveryThreshold = null
+        }
+    }
+
+    val context = LocalContext.current
+    val sessionManager = repository.sessionManager
+
+    // Swiggy-Style Promotional Coupon Popup (shown once per app session on cold start)
+    var showCouponPopup by remember { mutableStateOf(false) }
+    var activeCoupon by remember { mutableStateOf<Coupon?>(null) }
+    val clipboardManager = LocalClipboardManager.current
+    var hasShownCouponPopup by rememberSaveable { mutableStateOf(false) }
+
+    // Customer App: "Rate Us" Popup (shows after successful completed orders)
+    var showRatingPopup by remember { mutableStateOf(false) }
+    var completedOrderCount by remember { mutableStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        val currentUserId = sessionManager.getUserId()
+        if (!currentUserId.isNullOrBlank()) {
+            val result = repository.getCompletedOrderCount(currentUserId)
+            completedOrderCount = result.getOrNull() ?: 0
+            if (sessionManager.shouldShowRatingPopup(completedOrderCount) && !showCouponPopup) {
+                showRatingPopup = true
+                sessionManager.recordRatingPopupShown()
+            }
+        }
+    }
+
+    LaunchedEffect(selectedCity?.id) {
+        val cid = selectedCity?.id
+        if (!hasShownCouponPopup && cid != null) {
+            val result = repository.getCoupons(cid)
+            val coupon = result.getOrNull()?.firstOrNull { it.isActive }
+            if (coupon != null) {
+                activeCoupon = coupon
+                showCouponPopup = true
+                hasShownCouponPopup = true
+            }
+        }
+    }
 
     // Snackbar host
     val snackbarHostState = remember { SnackbarHostState() }
@@ -519,6 +575,52 @@ fun HomeScreen(
         )
     }
 
+    // Promotional Coupon Dialog
+    if (showCouponPopup && activeCoupon != null) {
+        CouponPopup(
+            coupon = activeCoupon!!,
+            onDismiss = {
+                showCouponPopup = false
+                if (sessionManager.shouldShowRatingPopup(completedOrderCount) && !showRatingPopup) {
+                    showRatingPopup = true
+                    sessionManager.recordRatingPopupShown()
+                }
+            },
+            onCopyCode = { code ->
+                clipboardManager.setText(AnnotatedString(code))
+                showCouponPopup = false
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Coupon code $code copied to clipboard!")
+                }
+                if (sessionManager.shouldShowRatingPopup(completedOrderCount) && !showRatingPopup) {
+                    showRatingPopup = true
+                    sessionManager.recordRatingPopupShown()
+                }
+            }
+        )
+    }
+
+    // Rate Us Popup
+    if (showRatingPopup) {
+        RateUsPopup(
+            onRateNow = {
+                showRatingPopup = false
+                sessionManager.recordUserRated()
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${context.packageName}"))
+                try {
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${context.packageName}")))
+                }
+            },
+            onMaybeLater = { showRatingPopup = false },
+            onDontAskAgain = {
+                showRatingPopup = false
+                sessionManager.recordRatingPopupDismissedForever()
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             SndmartTopBar(
@@ -726,6 +828,12 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
+                        freeDeliveryThreshold?.let { threshold ->
+                            item(span = { GridItemSpan(2) }) {
+                                FreeDeliveryBanner(threshold = threshold)
+                            }
+                        }
+
                         if (searchQuery.isBlank()) {
                             // Featured Deals Banner
                             item(span = { GridItemSpan(2) }) {
@@ -860,6 +968,12 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
+                            freeDeliveryThreshold?.let { threshold ->
+                                item {
+                                    FreeDeliveryBanner(threshold = threshold)
+                                }
+                            }
+
                             items(filteredHotels, key = { it.id }) { hotel ->
                                 HotelCard(
                                     vendor = hotel,
@@ -1481,3 +1595,207 @@ fun HotelCard(
         }
     }
 }
+
+@Composable
+fun FreeDeliveryBanner(threshold: Double, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .testTag("free_delivery_banner"),
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFFFF3E0), // warm amber background, Swiggy-style
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.LocalShipping,
+                contentDescription = null,
+                tint = Color(0xFFEF6C00),
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "FREE Delivery on orders above Rs ${threshold.toInt()}!",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                color = Color(0xFFEF6C00)
+            )
+        }
+    }
+}
+
+@Composable
+fun CouponPopup(
+    coupon: Coupon,
+    onDismiss: () -> Unit,
+    onCopyCode: (String) -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = Color.White,
+            modifier = Modifier
+                .fillMaxWidth(0.88f)
+                .testTag("coupon_popup_dialog")
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Default.LocalOffer,
+                    contentDescription = null,
+                    tint = Color(0xFFEF6C00),
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Special Offer For You!",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = discountSummaryText(coupon),
+                    fontSize = 14.sp,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFFFF3E0),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onCopyCode(coupon.code) }
+                        .testTag("copy_coupon_code_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 12.dp, horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = coupon.code,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 16.sp,
+                            letterSpacing = 1.sp,
+                            color = Color(0xFFEF6C00)
+                        )
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy",
+                            tint = Color(0xFFEF6C00),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("coupon_popup_dismiss_button")
+                ) {
+                    Text("Start Shopping")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RateUsPopup(
+    onRateNow: () -> Unit,
+    onMaybeLater: () -> Unit,
+    onDontAskAgain: () -> Unit
+) {
+    Dialog(onDismissRequest = onMaybeLater) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = Color.White,
+            modifier = Modifier
+                .fillMaxWidth(0.88f)
+                .testTag("rate_us_popup_dialog")
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    repeat(5) {
+                        Icon(
+                            imageVector = Icons.Filled.Star,
+                            contentDescription = "Star",
+                            tint = Color(0xFFFFB300),
+                            modifier = Modifier.size(28.dp).padding(horizontal = 2.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Enjoying Sndmart?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Your feedback helps us improve and helps other people in Sindhanur discover us. A quick 5-star rating would mean a lot!",
+                    fontSize = 14.sp,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+                Button(
+                    onClick = onRateNow,
+                    colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("rate_us_now_button")
+                ) {
+                    Text("Rate Us Now")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(
+                        onClick = onDontAskAgain,
+                        modifier = Modifier.testTag("rate_us_dont_ask_button")
+                    ) {
+                        Text("Don't Ask Again", fontSize = 12.sp, color = TextSecondary)
+                    }
+                    TextButton(
+                        onClick = onMaybeLater,
+                        modifier = Modifier.testTag("rate_us_maybe_later_button")
+                    ) {
+                        Text("Maybe Later", fontSize = 12.sp, color = TextSecondary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun discountSummaryText(coupon: Coupon): String {
+    val discountPart = if (coupon.discountType == "flat") {
+        "Flat Rs ${coupon.discountValue.toInt()} OFF"
+    } else {
+        "${coupon.discountValue.toInt()}% OFF"
+    }
+    val minOrderPart = coupon.minOrderAmount?.let {
+        if (it > 0) " on orders above Rs ${it.toInt()}" else ""
+    } ?: ""
+    return "$discountPart$minOrderPart"
+}
+

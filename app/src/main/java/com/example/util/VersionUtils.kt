@@ -1,7 +1,9 @@
 package com.example.util
 
+import com.example.BuildConfig
+
 object VersionUtils {
-    const val CURRENT_APP_VERSION = "1.6"
+    val CURRENT_APP_VERSION: String = BuildConfig.VERSION_NAME
 
     /**
      * Compare version strings formatted as x.y.z (e.g. "1.0.0" vs "1.0.1").

@@ -15,6 +15,9 @@ import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 import java.util.Locale
 import kotlin.coroutines.resume
 
@@ -157,37 +160,94 @@ object MapLocationHelper {
         null
     }
 
+    private val httpClient by lazy { OkHttpClient() }
+
+    /**
+     * Fallback to Google's Geocoding REST API using GoogleMapsConfig.apiKey when
+     * device built-in Geocoder fails or returns empty results.
+     */
+    suspend fun reverseGeocodeViaRestApi(lat: Double, lng: Double): GeocodeAddressResult? = withContext(Dispatchers.IO) {
+        if (!GoogleMapsConfig.isConfigured) return@withContext null
+        try {
+            val url = "https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lng&key=${GoogleMapsConfig.apiKey}"
+            val request = Request.Builder().url(url).build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                if (json.optString("status") != "OK") return@withContext null
+                val results = json.optJSONArray("results") ?: return@withContext null
+                if (results.length() == 0) return@withContext null
+                val firstResult = results.getJSONObject(0)
+                val formattedAddress = firstResult.optString("formatted_address")
+
+                var subLocality: String? = null
+                var locality: String? = null
+                var postalCode: String? = null
+                val components = firstResult.optJSONArray("address_components")
+                if (components != null) {
+                    for (i in 0 until components.length()) {
+                        val comp = components.getJSONObject(i)
+                        val types = comp.optJSONArray("types")?.let { arr ->
+                            (0 until arr.length()).map { arr.getString(it) }
+                        } ?: emptyList()
+                        val name = comp.optString("long_name")
+                        if ("sublocality" in types || "sublocality_level_1" in types) subLocality = name
+                        if ("locality" in types) locality = name
+                        if ("postal_code" in types) postalCode = name
+                    }
+                }
+
+                GeocodeAddressResult(
+                    addressLine = formattedAddress,
+                    featureName = null,
+                    subLocality = subLocality,
+                    locality = locality,
+                    postalCode = postalCode
+                )
+            }
+        } catch (e: Exception) {
+            Log.w("MapLocationHelper", "REST geocoding failed: ${e.message}")
+            null
+        }
+    }
+
     /**
      * Reverse-geocodes (lat, lng) to a human-readable street address.
+     * Tries the device's built-in Geocoder first; if that returns null or fails,
+     * falls back to Google's Geocoding REST API using the configured Maps API key.
      */
     suspend fun reverseGeocode(context: Context, latLng: com.google.android.gms.maps.model.LatLng): GeocodeAddressResult? =
         reverseGeocode(context, latLng.latitude, latLng.longitude)
 
     suspend fun reverseGeocode(context: Context, lat: Double, lng: Double): GeocodeAddressResult? = withContext(Dispatchers.IO) {
-        try {
+        // Try the device's built-in Geocoder first (fast, no network cost if it works)
+        val deviceResult = try {
             val geocoder = Geocoder(context, Locale("en", "IN"))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val addrs = suspendCancellableCoroutine<List<Address>> { cont ->
-                    try {
-                        geocoder.getFromLocation(lat, lng, 1) { addresses ->
-                            cont.resume(addresses)
+            if (Geocoder.isPresent()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val addrs = suspendCancellableCoroutine<List<Address>> { cont ->
+                        try {
+                            geocoder.getFromLocation(lat, lng, 1) { addresses ->
+                                cont.resume(addresses)
+                            }
+                        } catch (e: Exception) {
+                            cont.resume(emptyList())
                         }
-                    } catch (e: Exception) {
-                        cont.resume(emptyList())
                     }
+                    addrs.firstOrNull()?.let { formatAddress(it) }
+                } else {
+                    @Suppress("DEPRECATION")
+                    geocoder.getFromLocation(lat, lng, 1)?.firstOrNull()?.let { formatAddress(it) }
                 }
-                val addr = addrs.firstOrNull() ?: return@withContext null
-                formatAddress(addr)
-            } else {
-                @Suppress("DEPRECATION")
-                val addrs = geocoder.getFromLocation(lat, lng, 1)
-                val addr = addrs?.firstOrNull() ?: return@withContext null
-                formatAddress(addr)
-            }
+            } else null
         } catch (e: Exception) {
-            Log.w("MapLocationHelper", "Reverse geocoding failed: ${e.message}")
+            Log.w("MapLocationHelper", "Device geocoder failed: ${e.message}")
             null
         }
+
+        // Fall back to the REST API if the device geocoder didn't return anything
+        deviceResult ?: reverseGeocodeViaRestApi(lat, lng)
     }
 
     private fun formatAddress(addr: Address): GeocodeAddressResult {
