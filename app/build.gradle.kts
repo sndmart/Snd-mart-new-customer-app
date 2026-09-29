@@ -168,3 +168,11 @@ dependencies {
 tasks.withType<com.android.build.gradle.tasks.ProcessTestManifest>().configureEach {
   placeholdersValues.put("GOOGLE_MAPS_API_KEY", "TEST_KEY")
 }
+
+// mappingFileUploadEnabled = false (above) stops Crashlytics from uploading, but the Gradle
+// task's own input validation still runs first and fails fast because there's no
+// google-services.json in this repo to produce app/build/gmpAppId/release.txt from. Disable
+// the task outright so that validation never runs.
+tasks.matching { it.name.startsWith("uploadCrashlyticsMappingFile") }.configureEach {
+  enabled = false
+}
