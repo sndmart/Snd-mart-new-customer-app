@@ -64,6 +64,13 @@ class UserSessionManager(context: Context) {
             SupabaseClient.customAnonKey = customKey
         }
 
+        val savedUserId = prefs.getString(KEY_USER_ID, null)
+        if (!savedUserId.isNullOrBlank()) {
+            try {
+                com.google.firebase.crashlytics.FirebaseCrashlytics.getInstance().setUserId(savedUserId)
+            } catch (e: Throwable) {}
+        }
+
         SupabaseClient.sessionTokenProvider = object : SessionTokenProvider {
             override fun getAccessToken(): String? = this@UserSessionManager.getAccessToken()
             override fun getRefreshToken(): String? = this@UserSessionManager.getRefreshToken()
@@ -118,17 +125,13 @@ class UserSessionManager(context: Context) {
     }
 
     fun notifySessionExpired(message: String = "Your session expired, please log in again") {
-        Log.w("UserSessionManager", "Session expired: $message")
-        prefs.edit().apply {
-            remove(KEY_ACCESS_TOKEN)
-            remove(KEY_REFRESH_TOKEN)
-            remove(KEY_EXPIRES_AT)
-            apply()
+        val wasLoggedIn = _isLoggedIn.value || !getAccessToken().isNullOrBlank()
+        Log.w("UserSessionManager", "Session expired: $message (wasLoggedIn=$wasLoggedIn)")
+        logout()
+        if (wasLoggedIn) {
+            _sessionExpiredMessage.value = message
+            _sessionExpiredEvent.tryEmit(message)
         }
-        SupabaseClient.userAccessToken = null
-        _isLoggedIn.value = false
-        _sessionExpiredMessage.value = message
-        _sessionExpiredEvent.tryEmit(message)
     }
 
     fun clearSessionExpiredMessage() {
@@ -186,6 +189,12 @@ class UserSessionManager(context: Context) {
         if (phone != null) _userPhone.value = phone
         _isLoggedIn.value = !token.isNullOrBlank()
         _sessionExpiredMessage.value = null
+
+        if (!userId.isNullOrBlank()) {
+            try {
+                com.google.firebase.crashlytics.FirebaseCrashlytics.getInstance().setUserId(userId)
+            } catch (e: Throwable) {}
+        }
     }
 
     fun hasSavedSession(): Boolean {
@@ -283,6 +292,10 @@ class UserSessionManager(context: Context) {
         _unreadNotificationCount.value = 0
         _isLoggedIn.value = false
         _sessionExpiredMessage.value = null
+
+        try {
+            com.google.firebase.crashlytics.FirebaseCrashlytics.getInstance().setUserId("")
+        } catch (e: Throwable) {}
     }
 
     companion object {

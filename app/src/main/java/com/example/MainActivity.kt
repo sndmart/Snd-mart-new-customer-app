@@ -65,9 +65,9 @@ sealed class Screen(val route: String, val title: String) {
             return "hotel_menu/$vendorId/$encodedName"
         }
     }
-    object Checkout : Screen("checkout/{isHotel}/{couponCode}/{slotId}", "Checkout") {
-        fun createRoute(isHotel: Boolean, couponCode: String?, slotId: String?) =
-            "checkout/$isHotel/${couponCode ?: "none"}/${slotId ?: "none"}"
+    object Checkout : Screen("checkout/{isHotel}/{couponCode}", "Checkout") {
+        fun createRoute(isHotel: Boolean, couponCode: String?) =
+            "checkout/$isHotel/${couponCode ?: "none"}"
     }
     object OrderDetail : Screen("order_detail/{orderId}", "Order Details") {
         fun createRoute(orderId: String) = "order_detail/$orderId"
@@ -87,6 +87,7 @@ sealed class Screen(val route: String, val title: String) {
 class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
 
     private val pendingOrderId = mutableStateOf<String?>(null)
+    private val pendingOpenOrders = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -124,12 +125,14 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                 var pendingAutoCityChange by remember { mutableStateOf<City?>(null) }
                 val snackbarHostState = remember { SnackbarHostState() }
                 var snackbarMessage by remember { mutableStateOf<String?>(null) }
+                var isNavGraphReady by remember { mutableStateOf(false) }
 
                 // App Startup Checks (App version & Maintenance mode)
                 var startupCheckResult by remember { mutableStateOf<StartupCheckResult?>(null) }
-                var isCheckingStartup by remember { mutableStateOf(true) }
+                var isCheckingStartup by remember { mutableStateOf(false) }
 
                 fun executeStartupChecks() {
+                    if (isCheckingStartup) return
                     coroutineScope.launch {
                         isCheckingStartup = true
                         val result = repository.runStartupChecks()
@@ -309,15 +312,8 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                 // Rehydrate the user's cart from the cart_items table at session start.
                 // Clear any leftover memory state before syncing for the current user.
                 LaunchedEffect(userId) {
-                    val uid = userId
-                    if (uid == null) {
-                        // User is logged out: clear memory carts immediately
-                        repository.clearCartDirectly(isHotel = true)
-                        repository.clearCartDirectly(isHotel = false)
-                    } else {
-                        // Fresh user session: clear memory cart and load server cart
-                        repository.clearCartDirectly(isHotel = true)
-                        repository.clearCartDirectly(isHotel = false)
+                    repository.resetInMemoryCart()
+                    if (userId != null) {
                         repository.syncCartFromBackend()
                     }
                 }
@@ -413,12 +409,42 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                     }
                 }
 
+                var pendingSessionExpired by remember { mutableStateOf<String?>(null) }
+
                 // Redirect to login when session expires
                 LaunchedEffect(Unit) {
                     sessionManager.sessionExpiredEvent.collectLatest { message ->
-                        snackbarMessage = message
+                        if (isNavGraphReady) {
+                            snackbarMessage = message
+                            if (currentDestination != Screen.Auth.route) {
+                                try {
+                                    navController.navigate(Screen.Auth.route) {
+                                        popUpTo(0) { inclusive = true }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.w("MainActivity", "Failed to navigate to Auth: ${e.message}")
+                                }
+                            }
+                        } else {
+                            pendingSessionExpired = message
+                        }
+                    }
+                }
+
+                // Handle session expired that occurred while startup checks were running
+                LaunchedEffect(isNavGraphReady, pendingSessionExpired) {
+                    val pendingMsg = pendingSessionExpired
+                    if (isNavGraphReady && pendingMsg != null) {
+                        pendingSessionExpired = null
+                        snackbarMessage = pendingMsg
                         if (currentDestination != Screen.Auth.route) {
-                            navController.navigate(Screen.Auth.route)
+                            try {
+                                navController.navigate(Screen.Auth.route) {
+                                    popUpTo(0) { inclusive = true }
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.w("MainActivity", "Failed to navigate to Auth on pending session: ${e.message}")
+                            }
                         }
                     }
                 }
@@ -443,11 +469,24 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
 
                 // Navigation if opened with deep link or notification extra
                 val targetOrderId by pendingOrderId
-                LaunchedEffect(targetOrderId, currentDestination) {
+                val shouldOpenOrders by pendingOpenOrders
+                LaunchedEffect(targetOrderId, shouldOpenOrders, currentDestination, isNavGraphReady) {
+                    if (!isNavGraphReady || currentDestination == null) return@LaunchedEffect
                     val orderId = targetOrderId
                     if (!orderId.isNullOrBlank() && currentDestination != Screen.Auth.route && currentDestination != Screen.LocationOnboarding.route) {
-                        navController.navigate(Screen.OrderDetail.createRoute(orderId))
-                        pendingOrderId.value = null
+                        try {
+                            navController.navigate(Screen.OrderDetail.createRoute(orderId))
+                            pendingOrderId.value = null
+                        } catch (e: Exception) {
+                            android.util.Log.w("MainActivity", "Failed to navigate to OrderDetail: ${e.message}")
+                        }
+                    } else if (shouldOpenOrders && currentDestination != Screen.Auth.route && currentDestination != Screen.LocationOnboarding.route) {
+                        try {
+                            navController.navigate(Screen.Orders.route)
+                            pendingOpenOrders.value = false
+                        } catch (e: Exception) {
+                            android.util.Log.w("MainActivity", "Failed to navigate to Orders: ${e.message}")
+                        }
                     }
                 }
 
@@ -684,10 +723,10 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                     onNavigateToHotelMenu = { vendorId, vendorName ->
                                         navController.navigate(Screen.HotelMenu.createRoute(vendorId, vendorName))
                                     },
-                                    onOpenSettings = { showSupabaseSettings = true },
+                                    onOpenSettings = if (com.example.BuildConfig.DEBUG) { { showSupabaseSettings = true } } else null,
                                     onNavigateToNotifications = { navController.navigate(Screen.Notifications.route) },
                                     onProceedToCheckout = { isHotel ->
-                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null, null))
+                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null))
                                     }
                                 )
                             }
@@ -726,7 +765,7 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                     onBack = { navController.popBackStack() },
                                     onNavigateToCart = { navController.navigate(Screen.Cart.route) },
                                     onProceedToCheckout = { isHotel ->
-                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null, null))
+                                        navController.navigate(Screen.Checkout.createRoute(isHotel, null))
                                     }
                                 )
                             }
@@ -736,8 +775,8 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                     cityId = selectedCity?.id,
                                     repository = repository,
                                     onBack = { navController.popBackStack() },
-                                    onProceedToCheckout = { isHotel, coupon, slot ->
-                                        navController.navigate(Screen.Checkout.createRoute(isHotel, coupon, slot))
+                                    onProceedToCheckout = { isHotel, coupon ->
+                                        navController.navigate(Screen.Checkout.createRoute(isHotel, coupon))
                                     }
                                 )
                             }
@@ -746,17 +785,14 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                 route = Screen.Checkout.route,
                                 arguments = listOf(
                                     navArgument("isHotel") { type = NavType.BoolType },
-                                    navArgument("couponCode") { type = NavType.StringType },
-                                    navArgument("slotId") { type = NavType.StringType }
+                                    navArgument("couponCode") { type = NavType.StringType }
                                 )
                             ) { backStackEntry ->
                                 val isHotel = backStackEntry.arguments?.getBoolean("isHotel") ?: false
                                 val coupon = backStackEntry.arguments?.getString("couponCode")?.takeIf { it != "none" }
-                                val slot = backStackEntry.arguments?.getString("slotId")?.takeIf { it != "none" }
                                 CheckoutScreen(
                                     isHotel = isHotel,
                                     couponCode = coupon,
-                                    slotId = slot,
                                     cityId = selectedCity?.id,
                                     repository = repository,
                                     sessionManager = sessionManager,
@@ -806,7 +842,7 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                     onNavigateToMyReviews = { navController.navigate(Screen.MyReviews.route) },
                                     onNavigateToHelp = { navController.navigate(Screen.HelpSupport.createRoute()) },
                                     onRequireLogin = { navController.navigate(Screen.Auth.route) },
-                                    onOpenSettings = { showSupabaseSettings = true },
+                                    onOpenSettings = if (com.example.BuildConfig.DEBUG) { { showSupabaseSettings = true } } else null,
                                     onNavigateToNotifications = { navController.navigate(Screen.Notifications.route) },
                                     onLogoutSuccess = {
                                         navController.navigate(Screen.Auth.route) {
@@ -894,6 +930,9 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                             }
                         }
 
+                        LaunchedEffect(Unit) { isNavGraphReady = true }
+                        DisposableEffect(Unit) { onDispose { isNavGraphReady = false } }
+
                         // Top-floating in-app push notification banner
                         Box(
                             modifier = Modifier
@@ -904,10 +943,18 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                 notification = activeNotification,
                                 onDismiss = { activeNotification = null },
                                 onNavigateToOrder = { orderId ->
-                                    navController.navigate(Screen.OrderDetail.createRoute(orderId))
+                                    try {
+                                        navController.navigate(Screen.OrderDetail.createRoute(orderId))
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("MainActivity", "Failed to navigate to OrderDetail from banner: ${e.message}")
+                                    }
                                 },
                                 onNavigateToInbox = {
-                                    navController.navigate(Screen.Notifications.route)
+                                    try {
+                                        navController.navigate(Screen.Notifications.route)
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("MainActivity", "Failed to navigate to Notifications from banner: ${e.message}")
+                                    }
                                 }
                             )
                         }
@@ -999,8 +1046,8 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                             )
                         }
 
-                        // Supabase Settings Dialog
-                        if (showSupabaseSettings) {
+                        // Supabase Settings Dialog (debug only)
+                        if (com.example.BuildConfig.DEBUG && showSupabaseSettings) {
                             SupabaseSettingsDialog(
                                 sessionManager = sessionManager,
                                 onDismiss = { showSupabaseSettings = false }
@@ -1038,7 +1085,13 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
             val orderId = data.lastPathSegment
             if (!orderId.isNullOrBlank()) {
                 pendingOrderId.value = orderId
+                return
             }
+        }
+        val fromNotification = intent.getBooleanExtra("from_notification", false) ||
+            intent.hasExtra("google.message_id")
+        if (fromNotification) {
+            pendingOpenOrders.value = true
         }
     }
 

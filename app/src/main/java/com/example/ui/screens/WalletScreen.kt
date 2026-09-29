@@ -42,6 +42,21 @@ fun WalletScreen(
     var isLoadingMore by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var walletBalance by remember { mutableStateOf<Double?>(null) }
+    var isBalanceError by remember { mutableStateOf(false) }
+
+    fun loadBalance() {
+        if (userId.isNullOrBlank()) return
+        coroutineScope.launch {
+            val res = repository.getWalletBalance(userId)
+            if (res.isSuccess) {
+                walletBalance = res.getOrNull()
+                isBalanceError = false
+            } else {
+                isBalanceError = true
+            }
+        }
+    }
 
     fun loadWallet(reset: Boolean = true) {
         if (userId.isNullOrBlank()) {
@@ -78,12 +93,8 @@ fun WalletScreen(
 
     LaunchedEffect(userId) {
         loadWallet(reset = true)
+        loadBalance()
     }
-
-    val totalBalance = transactions.fold(0.0) { acc, txn ->
-        if (txn.type.lowercase() == "credit") acc + txn.amount
-        else acc - txn.amount
-    }.coerceAtLeast(0.0)
 
     Scaffold(
         topBar = {
@@ -95,7 +106,13 @@ fun WalletScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { loadWallet() }, modifier = Modifier.testTag("refresh_wallet_button")) {
+                    IconButton(
+                        onClick = {
+                            loadWallet(reset = true)
+                            loadBalance()
+                        },
+                        modifier = Modifier.testTag("refresh_wallet_button")
+                    ) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                 },
@@ -158,12 +175,21 @@ fun WalletScreen(
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(12.dp))
-                                Text(
-                                    "₹${"%.2f".format(totalBalance)}",
-                                    fontSize = 38.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
+                                if (isBalanceError) {
+                                    Text(
+                                        "Balance unavailable",
+                                        fontSize = 24.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                } else {
+                                    Text(
+                                        if (walletBalance != null) "₹${"%.2f".format(walletBalance)}" else "...",
+                                        fontSize = 38.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                }
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
                                     "Refunds from cancelled orders are credited here automatically.",

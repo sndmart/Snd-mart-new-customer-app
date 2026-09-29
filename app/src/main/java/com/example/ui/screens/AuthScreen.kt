@@ -122,7 +122,7 @@ fun AuthScreen(
                 FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
                     if (task.isSuccessful && task.result != null) {
                         val token = task.result
-                        Log.d("AuthScreen", "Retrieved FCM token on login: $token")
+                        Log.d("AuthScreen", "Retrieved FCM token on login successfully")
                         coroutineScope.launch {
                             try {
                                 repository.registerCustomerFcmToken(token)
@@ -253,9 +253,8 @@ fun AuthScreen(
                     sessionManager.updateProfileInfo(existingProfile)
                     registerFcm(uid)
 
-                    // Right after successful login/registration, clear and re-sync cart as safety net
-                    repository.clearCartDirectly(isHotel = true)
-                    repository.clearCartDirectly(isHotel = false)
+                    // Right after successful login/registration, clear memory cart and re-sync from backend
+                    repository.resetInMemoryCart()
                     repository.syncCartFromBackend()
 
                     val addressesRes = repository.getAddresses(uid)
@@ -326,9 +325,8 @@ fun AuthScreen(
                     phone = phone,
                     expiresInSeconds = verifiedExpiresIn
                 )
-                // Right after successful registration, clear and re-sync cart
-                repository.clearCartDirectly(isHotel = true)
-                repository.clearCartDirectly(isHotel = false)
+                // Right after successful registration, clear memory cart and re-sync from backend
+                repository.resetInMemoryCart()
                 repository.syncCartFromBackend()
 
                 sessionManager.updateProfileInfo(insertRes.getOrNull() ?: profileToInsert)

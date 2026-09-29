@@ -42,11 +42,41 @@ suspend fun registerCustomerFcmToken(token: String): Result<Unit> {
 
 open class CustomerFcmService : FirebaseMessagingService() {
 
+    private fun extractOrderId(message: RemoteMessage): String? {
+        val d = message.data
+        d["orderId"]?.takeIf { it.isNotBlank() }?.let { return it }
+        d["order_id"]?.takeIf { it.isNotBlank() }?.let { return it }
+        // Nested JSON string, e.g. data = {"data": "{\"order_id\":\"...\"}"}
+        d["data"]?.let { raw ->
+            try {
+                val obj = org.json.JSONObject(raw)
+                obj.optString("order_id").takeIf { it.isNotBlank() }?.let { return it }
+                obj.optString("orderId").takeIf { it.isNotBlank() }?.let { return it }
+            } catch (_: Exception) { }
+        }
+        for (key in listOf("order", "payload", "notification")) {
+            d[key]?.let { raw ->
+                try {
+                    val obj = org.json.JSONObject(raw)
+                    obj.optString("order_id").takeIf { it.isNotBlank() }?.let { return it }
+                    obj.optString("orderId").takeIf { it.isNotBlank() }?.let { return it }
+                } catch (_: Exception) { }
+            }
+        }
+        // Only treat "id" as an order id if the notification type is order-related
+        val type = d["type"]?.lowercase()
+        if (type != null && type.contains("order")) {
+            d["id"]?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return d["id"]?.takeIf { it.isNotBlank() }
+    }
+
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
-        val orderId = message.data["orderId"]
-            ?: message.data["order_id"]
-            ?: message.data["id"]
+        if (com.example.BuildConfig.DEBUG) {
+            Log.d(TAG, "Customer FCM raw message data keys: ${message.data.keys}, map=${message.data}")
+        }
+        val orderId = extractOrderId(message)
         val title = message.data["title"]
             ?: message.notification?.title
             ?: "Sndmart"
@@ -68,8 +98,9 @@ open class CustomerFcmService : FirebaseMessagingService() {
 
         // Create intent opening OrderDetailActivity
         val intent = Intent(this, OrderDetailActivity::class.java).apply {
-            putExtra("order_id", orderId)
-            if (orderId != null) {
+            putExtra("from_notification", true)
+            if (!orderId.isNullOrBlank()) {
+                putExtra("order_id", orderId)
                 putExtra("orderId", orderId)
             }
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -109,7 +140,7 @@ open class CustomerFcmService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        Log.d(TAG, "Customer FCM onNewToken: $token")
+        Log.d(TAG, "Customer FCM onNewToken received")
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 registerCustomerFcmToken(token)

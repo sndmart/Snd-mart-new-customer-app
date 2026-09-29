@@ -48,10 +48,10 @@ fun CityPickerSheet(
     var pendingCityChange by remember { mutableStateOf<City?>(null) }
     var showSupabaseSettings by remember { mutableStateOf(false) }
 
-    fun loadCities() {
-        coroutineScope.launch {
-            isLoading = true
-            errorMessage = null
+    suspend fun performLoadCities() {
+        isLoading = true
+        errorMessage = null
+        try {
             val res = repository.getActiveCities()
             if (res.isSuccess) {
                 // Rule: cities table, status='active' strictly from backend
@@ -61,11 +61,18 @@ fun CityPickerSheet(
                 errorMessage = res.exceptionOrNull()?.message ?: "Unable to load cities from backend"
                 cities = emptyList()
             }
+        } finally {
             isLoading = false
         }
     }
 
-    if (showSupabaseSettings) {
+    fun loadCities() {
+        coroutineScope.launch {
+            performLoadCities()
+        }
+    }
+
+    if (com.example.BuildConfig.DEBUG && showSupabaseSettings) {
         SupabaseSettingsDialog(
             sessionManager = sessionManager,
             onDismiss = {
@@ -76,7 +83,7 @@ fun CityPickerSheet(
     }
 
     LaunchedEffect(Unit) {
-        loadCities()
+        performLoadCities()
     }
 
     fun applyCitySelection(city: City) {
@@ -259,12 +266,22 @@ fun CityPickerSheet(
                             )
                         }
                         Spacer(modifier = Modifier.width(6.dp))
-                        FilledTonalButton(
-                            onClick = { showSupabaseSettings = true },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            shape = RoundedCornerShape(16.dp)
-                        ) {
-                            Text("API Key", fontSize = 11.sp)
+                        if (com.example.BuildConfig.DEBUG) {
+                            FilledTonalButton(
+                                onClick = { showSupabaseSettings = true },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Text("API Key", fontSize = 11.sp)
+                            }
+                        } else {
+                            FilledTonalButton(
+                                onClick = { loadCities() },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Text("Retry", fontSize = 11.sp)
+                            }
                         }
                     }
                 }
@@ -283,7 +300,7 @@ fun CityPickerSheet(
                 ErrorCard(
                     message = errorMessage ?: "No active cities found.",
                     onRetry = { loadCities() },
-                    onConfigureKey = { showSupabaseSettings = true },
+                    onConfigureKey = if (com.example.BuildConfig.DEBUG) { { showSupabaseSettings = true } } else null,
                     modifier = Modifier.padding(16.dp)
                 )
             } else {

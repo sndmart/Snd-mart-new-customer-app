@@ -27,6 +27,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      - name: Decode signing keystore
+        run: echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > app/signing.keystore
+
+      - name: Create .env for build secrets
+        run: |
+          echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> .env
+          echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> .env
+
       - name: Build Signed Android App Bundle (AAB) and APK
         run: gradle :app:bundleRelease :app:assembleRelease --no-daemon
         env:

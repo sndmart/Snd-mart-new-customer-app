@@ -54,7 +54,6 @@ private fun Context.findActivity(): Activity? {
 fun CheckoutScreen(
     isHotel: Boolean,
     couponCode: String?,
-    slotId: String?,
     cityId: String?,
     repository: SndmartRepository,
     sessionManager: UserSessionManager,
@@ -83,15 +82,13 @@ fun CheckoutScreen(
     var isLoadingFreshCart by remember { mutableStateOf(true) }
     val subtotal = freshItems.sumOf { it.totalPrice }
 
-    // Delivery Options (delivery_slots and express_delivery_settings)
-    var scheduledSlots by remember { mutableStateOf<List<DeliverySlot>>(emptyList()) }
-    var expressSettings by remember { mutableStateOf<ExpressDeliverySettings?>(null) }
-    var isLoadingDeliverySettings by remember { mutableStateOf(true) }
-    var deliverySettingsError by remember { mutableStateOf<String?>(null) }
-
-    // Selected delivery type ("scheduled" or "express" or "none")
-    var selectedDeliveryType by remember { mutableStateOf(if (slotId != null) "scheduled" else "scheduled") }
-    var selectedSlotId by remember { mutableStateOf<String?>(slotId) }
+    // ONE Delivery System: "Express Delivery" Only
+    var calculatedDeliveryFee by remember { mutableStateOf<Double?>(null) }
+    var isLoadingDeliveryFee by remember { mutableStateOf(false) }
+    var deliveryFeeError by remember { mutableStateOf<String?>(null) }
+    var handlingFee by remember { mutableStateOf(5.0) }
+    var cityDeliverySettings by remember { mutableStateOf<CityDeliverySettings?>(null) }
+    var isCityActive by remember { mutableStateOf(true) }
 
     // Coupon handling (authoritative Supabase validation)
     var couponInput by remember { mutableStateOf(couponCode ?: "") }
@@ -103,8 +100,7 @@ fun CheckoutScreen(
     // Payment methods
     val paymentMethods = listOf(
         "cod" to "Cash on Delivery (COD)",
-        "upi" to "UPI / Instant Pay",
-        "card" to "Credit / Debit Card"
+        "upi" to "UPI / Instant Pay"
     )
     var selectedPaymentMethod by remember { mutableStateOf("cod") }
 
@@ -228,27 +224,10 @@ fun CheckoutScreen(
         loadAddresses()
     }
 
-    // When selected address changes, resolve city & distance
-    LaunchedEffect(selectedAddress, freshItems, effectiveCityId, isHotel) {
-        if (selectedAddress != null) {
-            val addrCityId = selectedAddress.cityId
-            if (!addrCityId.isNullOrBlank()) {
-                effectiveCityId = addrCityId
-            }
-            val hotelVendorId = if (isHotel) {
-                repository.hotelCart.value.firstOrNull()?.vendorId
-                    ?: freshItems.firstOrNull { !it.cartItem.vendorId.isNullOrBlank() }?.cartItem?.vendorId
-                    ?: freshItems.firstOrNull { !it.product.vendorId.isNullOrBlank() }?.product?.vendorId
-            } else {
-                null
-            }
-            val dist = repository.resolveDeliveryDistanceKm(
-                address = selectedAddress,
-                cityId = effectiveCityId ?: selectedAddress.cityId,
-                vendorId = hotelVendorId,
-                isHotel = isHotel
-            )
-            addressDistanceKm = dist
+    LaunchedEffect(effectiveCityId) {
+        if (!effectiveCityId.isNullOrBlank()) {
+            val cityRes = repository.getCity(effectiveCityId!!)
+            isCityActive = cityRes.getOrNull()?.status?.lowercase() != "inactive"
         }
     }
 
@@ -269,62 +248,6 @@ fun CheckoutScreen(
         fetchFreshCart()
     }
 
-    // Load delivery options (delivery_slots and express_delivery_settings) from Supabase
-    fun loadDeliveryOptions() {
-        val cid = effectiveCityId ?: return
-        coroutineScope.launch {
-            isLoadingDeliverySettings = true
-            deliverySettingsError = null
-
-            val slotsRes = repository.getDeliverySlots(cid)
-            val expressRes = repository.getExpressDeliverySettings(cid)
-
-            val slots = slotsRes.getOrNull() ?: emptyList()
-            val express = expressRes.getOrNull()
-
-            scheduledSlots = slots
-            expressSettings = express
-
-            val hasSlots = slots.isNotEmpty()
-            val hasExpress = express != null && express.isActive
-
-            if (hasSlots && hasExpress) {
-                // Both available -> preserve choice or default to scheduled
-                if (selectedDeliveryType == "express") {
-                    selectedDeliveryType = "express"
-                    selectedSlotId = null
-                } else {
-                    selectedDeliveryType = "scheduled"
-                    if (selectedSlotId == null || slots.none { it.id == selectedSlotId }) {
-                        selectedSlotId = slots.firstOrNull()?.id
-                    }
-                }
-            } else if (hasSlots && !hasExpress) {
-                // Only slots available -> no toggle needed
-                selectedDeliveryType = "scheduled"
-                if (selectedSlotId == null || slots.none { it.id == selectedSlotId }) {
-                    selectedSlotId = slots.firstOrNull()?.id
-                }
-            } else if (!hasSlots && hasExpress) {
-                // Only express available -> no toggle needed
-                selectedDeliveryType = "express"
-                selectedSlotId = null
-            } else {
-                // Neither available
-                selectedDeliveryType = "none"
-                selectedSlotId = null
-            }
-
-            isLoadingDeliverySettings = false
-        }
-    }
-
-    LaunchedEffect(effectiveCityId) {
-        if (!effectiveCityId.isNullOrBlank()) {
-            loadDeliveryOptions()
-        }
-    }
-
     // Coupon validation function
     fun applyCouponCode(code: String) {
         val cid = effectiveCityId ?: return
@@ -335,15 +258,15 @@ fun CheckoutScreen(
             couponErrorMessage = null
             val res = repository.validateAndApplyCoupon(code, cid, subtotal, userId)
             if (res.isSuccess) {
-                val validation = res.getOrNull()!!
-                if (validation.isValid) {
+                val validation = res.getOrNull()
+                if (validation != null && validation.isValid) {
                     appliedCoupon = validation.coupon ?: Coupon(code = code.trim().uppercase(), discountValue = validation.discountAmount)
                     authoritativeDiscount = validation.discountAmount
                     couponErrorMessage = null
                 } else {
                     appliedCoupon = null
                     authoritativeDiscount = 0.0
-                    couponErrorMessage = validation.errorMessage ?: "Coupon is not valid for this order"
+                    couponErrorMessage = validation?.errorMessage ?: "Coupon is not valid for this order"
                 }
             } else {
                 appliedCoupon = null
@@ -361,42 +284,87 @@ fun CheckoutScreen(
         }
     }
 
-    val distanceKm = addressDistanceKm ?: 1.0
-    val hasActiveSlots = scheduledSlots.isNotEmpty()
-    val hasActiveExpress = expressSettings != null && expressSettings!!.isActive
-    val isDeliveryAvailable = hasActiveSlots || hasActiveExpress
+    val isAddressCityMismatch = selectedAddress != null &&
+            !selectedAddress.cityId.isNullOrBlank() &&
+            !effectiveCityId.isNullOrBlank() &&
+            selectedAddress.cityId?.removePrefix("eq.")?.trim() != effectiveCityId?.removePrefix("eq.")?.trim()
 
-    val matchedSlot = scheduledSlots.find { it.id == selectedSlotId } ?: scheduledSlots.firstOrNull()
-    val scheduledFee = matchedSlot?.getEffectiveDeliveryFee(subtotal) ?: 0.0
-    val isSlotFree = matchedSlot?.isFreeDeliveryEligible(subtotal) == true
+    val isDeliveryAvailable = selectedAddress != null && !isAddressCityMismatch && isCityActive
+    val distanceKm = addressDistanceKm ?: 0.0
+    val expressMinutes = cityDeliverySettings?.expressDeliveryMinutes ?: 30
+    val freeDeliveryMinOrder = cityDeliverySettings?.effectiveFreeDeliveryMinOrder ?: 99.0
+    val subtotalAfterDiscount = (subtotal - authoritativeDiscount).coerceAtLeast(0.0)
 
-    val (expressFee, isExpressFree) = if (expressSettings != null) {
-        expressSettings!!.calculateCharge(distanceKm, subtotal)
-    } else {
-        Pair(0.0, false)
+    fun calculateFees() {
+        val cid = effectiveCityId ?: return
+        val addr = selectedAddress ?: return
+        if (!isDeliveryAvailable) {
+            calculatedDeliveryFee = null
+            deliveryFeeError = null
+            return
+        }
+
+        coroutineScope.launch {
+            isLoadingDeliveryFee = true
+            deliveryFeeError = null
+
+            val hotelVendorId = if (isHotel) {
+                repository.hotelCart.value.firstOrNull()?.vendorId
+                    ?: freshItems.firstOrNull { !it.cartItem.vendorId.isNullOrBlank() }?.cartItem?.vendorId
+                    ?: freshItems.firstOrNull { !it.product.vendorId.isNullOrBlank() }?.product?.vendorId
+            } else {
+                null
+            }
+
+            val dist = repository.resolveServerDistanceKm(
+                address = addr,
+                cityId = cid,
+                vendorId = hotelVendorId,
+                isHotel = isHotel
+            )
+            addressDistanceKm = dist
+
+            val settingsRes = repository.getCityDeliverySettings(cid)
+            cityDeliverySettings = settingsRes.getOrNull()
+
+            val handlingRes = repository.getHandlingFee(cid)
+            if (handlingRes.isSuccess) {
+                handlingFee = handlingRes.getOrNull() ?: 5.0
+            }
+
+            val feeRes = repository.calculateDeliveryFee(
+                cityId = cid,
+                distanceKm = dist,
+                subtotalAfterDiscount = subtotalAfterDiscount
+            )
+            if (feeRes.isSuccess) {
+                calculatedDeliveryFee = feeRes.getOrNull()
+                deliveryFeeError = null
+            } else {
+                calculatedDeliveryFee = null
+                deliveryFeeError = "Could not calculate delivery fee - tap to retry"
+            }
+            isLoadingDeliveryFee = false
+        }
     }
 
-    val calculatedDeliveryFee: Double? = when {
-        !isDeliveryAvailable -> null
-        selectedDeliveryType == "express" && hasActiveExpress -> expressFee
-        selectedDeliveryType == "scheduled" && hasActiveSlots -> scheduledFee
-        else -> null
+    LaunchedEffect(selectedAddressId, freshItems, authoritativeDiscount, effectiveCityId, isHotel, isDeliveryAvailable) {
+        if (isDeliveryAvailable && selectedAddress != null && !effectiveCityId.isNullOrBlank()) {
+            calculateFees()
+        } else {
+            calculatedDeliveryFee = null
+            deliveryFeeError = null
+        }
     }
 
-    val isExpressMinOrderNotMet = selectedDeliveryType == "express" &&
-            expressSettings?.minOrderAmount != null &&
-            subtotal < expressSettings!!.minOrderAmount!!
-
-    val handlingFee = 5.0
-    val totalAmount = if (calculatedDeliveryFee != null) {
-        (subtotal - authoritativeDiscount + calculatedDeliveryFee + handlingFee).coerceAtLeast(0.0)
+    val totalAmount = if (calculatedDeliveryFee != null && isDeliveryAvailable) {
+        (subtotalAfterDiscount + calculatedDeliveryFee!! + handlingFee).coerceAtLeast(0.0)
     } else null
 
     val isCheckoutDisabled = isPlacingOrder ||
-            isLoadingDeliverySettings ||
+            isLoadingDeliveryFee ||
+            calculatedDeliveryFee == null ||
             !isDeliveryAvailable ||
-            (selectedDeliveryType == "scheduled" && matchedSlot == null) ||
-            isExpressMinOrderNotMet ||
             selectedAddressId == null ||
             effectiveCityId == null ||
             subtotal <= 0.0
@@ -429,17 +397,19 @@ fun CheckoutScreen(
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
-                    } else if (!isDeliveryAvailable && !isLoadingDeliverySettings) {
+                    } else if (deliveryFeeError != null) {
                         Text(
-                            text = "Delivery isn't currently available in your area",
+                            text = deliveryFeeError!!,
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 8.dp)
+                            modifier = Modifier
+                                .clickable { calculateFees() }
+                                .padding(bottom = 8.dp)
                         )
-                    } else if (isExpressMinOrderNotMet) {
+                    } else if (!isDeliveryAvailable && !isLoadingAddresses && addresses.isNotEmpty()) {
                         Text(
-                            text = "Minimum order ₹${"%.0f".format(expressSettings!!.minOrderAmount!!)} required for Express Delivery",
+                            text = "Delivery isn't currently available in your area",
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
@@ -470,12 +440,6 @@ fun CheckoutScreen(
                                 }
                                 return@Button
                             }
-                            if (isExpressMinOrderNotMet) {
-                                coroutineScope.launch {
-                                    snackbarHostState.showSnackbar("Minimum order ₹${"%.0f".format(expressSettings!!.minOrderAmount!!)} required for Express Delivery")
-                                }
-                                return@Button
-                            }
 
                             coroutineScope.launch {
                                 isPlacingOrder = true
@@ -497,12 +461,6 @@ fun CheckoutScreen(
                                 } else {
                                     null
                                 }
-                                val deliverySnapshot = mapOf(
-                                    "delivery_type" to selectedDeliveryType,
-                                    "delivery_fee" to (calculatedDeliveryFee ?: 0.0),
-                                    "distance_km" to distanceKm,
-                                    "slot_id" to if (selectedDeliveryType == "scheduled") selectedSlotId else null
-                                )
 
                                 val res = repository.placeOrder(
                                     userId = userId,
@@ -510,21 +468,25 @@ fun CheckoutScreen(
                                     vendorId = hotelVendorId,
                                     cityId = effectiveCityId!!,
                                     addressId = selectedAddressId!!,
-                                    slotId = if (selectedDeliveryType == "scheduled") selectedSlotId else null,
                                     paymentMethod = selectedPaymentMethod,
-                                    coupon = appliedCoupon,
-                                    deliveryType = selectedDeliveryType,
-                                    deliveryDistanceKm = distanceKm,
-                                    deliveryOptionSnapshot = deliverySnapshot
+                                    coupon = appliedCoupon
                                 )
 
                                 if (res.isSuccess) {
-                                    val order = res.getOrNull()!!
+                                    val order = res.getOrNull()
+                                    if (order == null) {
+                                        isPlacingOrder = false
+                                        val err = "Failed to process order details. Please try again."
+                                        placementError = err
+                                        snackbarHostState.showSnackbar(err)
+                                        return@launch
+                                    }
                                     if (selectedPaymentMethod == "upi") {
                                         // Step 2 — Create the Razorpay order for this Sndmart order
                                         placingOrderMessage = "Initiating UPI payment..."
                                         val rpRes = repository.createRazorpayOrder(order.id ?: "")
-                                        if (rpRes.isFailure) {
+                                        val rpData = rpRes.getOrNull()
+                                        if (rpRes.isFailure || rpData == null) {
                                             isPlacingOrder = false
                                             val err = "Could not start payment. Please try again."
                                             placementError = err
@@ -532,7 +494,6 @@ fun CheckoutScreen(
                                             return@launch
                                         }
 
-                                        val rpData = rpRes.getOrNull()!!
                                         val activity = context.findActivity()
                                         if (activity == null) {
                                             isPlacingOrder = false
@@ -570,6 +531,11 @@ fun CheckoutScreen(
                                 } else {
                                     isPlacingOrder = false
                                     val err = res.exceptionOrNull()?.message ?: "Failed to place order"
+                                    if (err.contains("coupon", ignoreCase = true) || err.contains("minimum order amount", ignoreCase = true)) {
+                                        appliedCoupon = null
+                                        authoritativeDiscount = 0.0
+                                        couponErrorMessage = err
+                                    }
                                     placementError = err
                                     snackbarHostState.showSnackbar(err)
                                 }
@@ -586,10 +552,14 @@ fun CheckoutScreen(
                             disabledContainerColor = NaturalPrimary.copy(alpha = 0.4f)
                         )
                     ) {
-                        if (isPlacingOrder || isLoadingDeliverySettings) {
+                        if (isPlacingOrder) {
                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (isPlacingOrder) placingOrderMessage else "Loading Options...")
+                            Text(placingOrderMessage)
+                        } else if (isLoadingDeliveryFee) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Calculating Delivery...")
                         } else {
                             val totalText = if (totalAmount != null) " • ₹${"%.0f".format(totalAmount)}" else ""
                             val actionLabel = if (selectedPaymentMethod == "upi") "Pay via UPI" else "Confirm & Place Order"
@@ -785,7 +755,7 @@ fun CheckoutScreen(
                 }
             }
 
-            // Delivery Method Section (Dynamically powered by Supabase RPC)
+            // Delivery Method Section - ONE Delivery System: "Express Delivery" Only
             item {
                 Card(
                     modifier = Modifier
@@ -806,35 +776,18 @@ fun CheckoutScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            if (isLoadingDeliverySettings) {
+                            if (isLoadingDeliveryFee) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = NaturalPrimary)
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Updating...", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                                    Text("Calculating...", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                                 }
                             }
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        if (isLoadingDeliverySettings) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(56.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(56.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                                )
-                            }
-                        } else if (!isDeliveryAvailable) {
+                        if (!isDeliveryAvailable) {
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
@@ -860,344 +813,155 @@ fun CheckoutScreen(
                                 }
                             }
                         } else {
-                            // If BOTH Scheduled slots and Express settings exist: Show Tab Toggle!
-                            if (hasActiveSlots && hasActiveExpress) {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(bottom = 12.dp)
-                                ) {
+                            // Fixed Card: "Express Delivery - arrives in about {N} min", plus fee ("FREE" when 0)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.5.dp,
+                                    color = NaturalPrimary.copy(alpha = 0.6f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("express_delivery_card")
+                            ) {
+                                Column(modifier = Modifier.padding(14.dp)) {
                                     Row(
-                                        modifier = Modifier.padding(4.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        val isScheduledTab = selectedDeliveryType == "scheduled"
-                                        val isExpressTab = selectedDeliveryType == "express"
-
-                                        // Scheduled Delivery Tab
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = if (isScheduledTab) NaturalPrimary else Color.Transparent,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable {
-                                                    selectedDeliveryType = "scheduled"
-                                                    if (selectedSlotId == null) {
-                                                        selectedSlotId = scheduledSlots.firstOrNull()?.id
-                                                    }
-                                                }
-                                                .testTag("tab_scheduled_delivery")
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Row(
-                                                modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
-                                                horizontalArrangement = Arrangement.Center,
-                                                verticalAlignment = Alignment.CenterVertically
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = Color(0xFFFF9800).copy(alpha = 0.15f),
+                                                modifier = Modifier.size(36.dp)
                                             ) {
-                                                Icon(
-                                                    Icons.Default.CalendarToday,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(15.dp),
-                                                    tint = if (isScheduledTab) Color.White else TextPrimary
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    "Scheduled Delivery",
-                                                    fontWeight = FontWeight.Bold,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    color = if (isScheduledTab) Color.White else TextPrimary,
-                                                    maxLines = 1
-                                                )
-                                            }
-                                        }
-
-                                        // Express Delivery Tab
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = if (isExpressTab) NaturalPrimary else Color.Transparent,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable { selectedDeliveryType = "express" }
-                                                .testTag("tab_express_delivery")
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
-                                                horizontalArrangement = Arrangement.Center,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(
-                                                    Icons.Default.Bolt,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(17.dp),
-                                                    tint = if (isExpressTab) Color.White else Color(0xFFE65100)
-                                                )
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                val mins = expressSettings?.estimatedMinutes ?: 30
-                                                Text(
-                                                    "Express (~$mins min)",
-                                                    fontWeight = FontWeight.Bold,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    color = if (isExpressTab) Color.White else TextPrimary,
-                                                    maxLines = 1
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 1. SCHEDULED DELIVERY CONTENT (when scheduled is selected or it's the only option)
-                            if (selectedDeliveryType == "scheduled" && hasActiveSlots) {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (!hasActiveExpress) {
-                                        Text(
-                                            "Scheduled Delivery Slots",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TextPrimary
-                                        )
-                                    }
-
-                                    scheduledSlots.forEach { slot ->
-                                        val isPicked = selectedSlotId == slot.id
-                                        val isSlotFree = slot.isFreeDeliveryEligible(subtotal)
-                                        val effectiveFee = slot.getEffectiveDeliveryFee(subtotal)
-                                        val neededMore = slot.amountNeededForFreeDelivery(subtotal)
-
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = if (isPicked) NaturalPrimaryContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface,
-                                            border = androidx.compose.foundation.BorderStroke(
-                                                width = if (isPicked) 2.dp else 1.dp,
-                                                color = if (isPicked) NaturalPrimary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-                                            ),
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { selectedSlotId = slot.id }
-                                                .testTag("slot_radio_${slot.id}")
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(12.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                RadioButton(
-                                                    selected = isPicked,
-                                                    onClick = { selectedSlotId = slot.id },
-                                                    colors = RadioButtonDefaults.colors(selectedColor = NaturalPrimary)
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(
-                                                        text = slot.name,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = if (isPicked) FontWeight.Bold else FontWeight.Medium
-                                                    )
-                                                    val times = listOfNotNull(
-                                                        slot.displayStartTime.takeIf { it.isNotBlank() },
-                                                        slot.displayEndTime.takeIf { it.isNotBlank() }
-                                                    ).joinToString(" - ")
-                                                    if (times.isNotBlank()) {
-                                                        Text(
-                                                            text = times,
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = TextSecondary
-                                                        )
-                                                    }
-                                                    if (slot.isFreeDelivery == true && slot.minOrderAmount != null && slot.minOrderAmount > 0.0) {
-                                                        val helperText = if (isSlotFree) {
-                                                            "Free delivery unlocked (Min order ₹${"%.0f".format(slot.minOrderAmount)})"
-                                                        } else {
-                                                            "Add ₹${"%.0f".format(neededMore)} more for free delivery (Min order ₹${"%.0f".format(slot.minOrderAmount)})"
-                                                        }
-                                                        Text(
-                                                            text = helperText,
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = if (isSlotFree) NaturalPrimary else TextSecondary
-                                                        )
-                                                    } else if (slot.minOrderAmount != null && slot.minOrderAmount > 0.0) {
-                                                        Text(
-                                                            text = "Min order ₹${"%.0f".format(slot.minOrderAmount)}",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = TextSecondary
-                                                        )
-                                                    }
-                                                }
-                                                if (isSlotFree) {
-                                                    Surface(
-                                                        color = NaturalPrimary.copy(alpha = 0.15f),
-                                                        shape = RoundedCornerShape(4.dp)
-                                                    ) {
-                                                        Text(
-                                                            "FREE",
-                                                            color = NaturalPrimary,
-                                                            fontWeight = FontWeight.Bold,
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                        )
-                                                    }
-                                                } else {
-                                                    Text(
-                                                        text = "₹${"%.0f".format(effectiveFee)}",
-                                                        fontWeight = FontWeight.Bold,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        color = TextPrimary
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        Icons.Default.Bolt,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFFE65100),
+                                                        modifier = Modifier.size(22.dp)
                                                     )
                                                 }
                                             }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 2. EXPRESS DELIVERY CONTENT (when express is selected or it's the only option)
-                            if (selectedDeliveryType == "express" && hasActiveExpress && expressSettings != null) {
-                                val settings = expressSettings!!
-                                val minOrderMet = settings.isSubtotalEligible(subtotal)
-                                val minOrder = settings.minOrderAmount ?: 0.0
-
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Surface(
-                                        shape = RoundedCornerShape(12.dp),
-                                        color = if (minOrderMet) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            width = 1.5.dp,
-                                            color = if (minOrderMet) Color(0xFFFF9800) else MaterialTheme.colorScheme.outlineVariant
-                                        ),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("express_delivery_card")
-                                    ) {
-                                        Column(modifier = Modifier.padding(14.dp)) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Surface(
-                                                        shape = RoundedCornerShape(8.dp),
-                                                        color = Color(0xFFFF9800).copy(alpha = 0.15f),
-                                                        modifier = Modifier.size(32.dp)
-                                                    ) {
-                                                        Box(contentAlignment = Alignment.Center) {
-                                                            Icon(
-                                                                Icons.Default.Bolt,
-                                                                contentDescription = null,
-                                                                tint = Color(0xFFE65100),
-                                                                modifier = Modifier.size(20.dp)
-                                                            )
-                                                        }
-                                                    }
-                                                    Spacer(modifier = Modifier.width(10.dp))
-                                                    Column {
-                                                        Text(
-                                                            "Express Delivery",
-                                                            style = MaterialTheme.typography.titleSmall,
-                                                            fontWeight = FontWeight.Bold
-                                                        )
-                                                        Text(
-                                                            "Delivered within ${settings.estimatedMinutes} minutes",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = TextSecondary
-                                                        )
-                                                    }
-                                                }
-
-                                                if (minOrderMet) {
-                                                    if (isExpressFree) {
-                                                        Surface(
-                                                            color = NaturalPrimary.copy(alpha = 0.15f),
-                                                            shape = RoundedCornerShape(4.dp)
-                                                        ) {
-                                                            Text(
-                                                                "FREE",
-                                                                color = NaturalPrimary,
-                                                                fontWeight = FontWeight.ExtraBold,
-                                                                style = MaterialTheme.typography.labelSmall,
-                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                            )
-                                                        }
-                                                    } else {
-                                                        Text(
-                                                            "₹${"%.0f".format(expressFee)}",
-                                                            style = MaterialTheme.typography.titleMedium,
-                                                            fontWeight = FontWeight.ExtraBold,
-                                                            color = Color(0xFFE65100)
-                                                        )
-                                                    }
-                                                }
-                                            }
-
-                                            Spacer(modifier = Modifier.height(8.dp))
-
-                                            // Distance & Fee Breakdown details
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(
-                                                    Icons.Outlined.Navigation,
-                                                    contentDescription = null,
-                                                    tint = TextSecondary,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                                Spacer(modifier = Modifier.width(4.dp))
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column {
                                                 Text(
-                                                    "Distance: ~${"%.1f".format(distanceKm)} km from ${if (isHotel) "hotel" else "city dispatch hub"}",
+                                                    "Express Delivery",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    "Arrives in about $expressMinutes min",
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = TextSecondary
                                                 )
                                             }
+                                        }
 
-                                            if (!minOrderMet) {
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Surface(
-                                                    shape = RoundedCornerShape(8.dp),
-                                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
-                                                    modifier = Modifier.fillMaxWidth()
-                                                ) {
-                                                    Row(
-                                                        modifier = Modifier.padding(8.dp),
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        Icon(
-                                                            Icons.Outlined.Info,
-                                                            contentDescription = null,
-                                                            tint = MaterialTheme.colorScheme.error,
-                                                            modifier = Modifier.size(16.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(6.dp))
-                                                        Text(
-                                                            "Minimum order ₹${"%.0f".format(minOrder)} for Express Delivery",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.onErrorContainer,
-                                                            fontWeight = FontWeight.SemiBold
-                                                        )
-                                                    }
-                                                }
-                                            } else if (isExpressFree) {
-                                                Spacer(modifier = Modifier.height(6.dp))
+                                        if (isLoadingDeliveryFee) {
+                                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = NaturalPrimary)
+                                        } else if (deliveryFeeError != null) {
+                                            TextButton(
+                                                onClick = { calculateFees() },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
                                                 Text(
-                                                    "Free delivery unlocked! (Order subtotal > ₹${"%.0f".format(settings.freeDeliveryMinOrder ?: 0.0)} within ${"%.0f".format(settings.freeDeliveryMaxKm ?: 0.0)} km)",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = NaturalPrimary,
-                                                    fontWeight = FontWeight.SemiBold
+                                                    "Retry",
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.Bold
                                                 )
-                                            } else if (settings.baseKm != null && settings.baseCharge != null) {
-                                                Spacer(modifier = Modifier.height(4.dp))
-                                                val breakdown = if (distanceKm <= settings.baseKm!!) {
-                                                    "Base fee ₹${"%.0f".format(settings.baseCharge!!)} up to ${"%.0f".format(settings.baseKm!!)} km"
-                                                } else {
-                                                    "Base ₹${"%.0f".format(settings.baseCharge!!)} + ₹${"%.0f".format(settings.perKmChargeBeyond ?: 0.0)}/km beyond ${"%.0f".format(settings.baseKm!!)} km"
-                                                }
+                                            }
+                                        } else if (calculatedDeliveryFee == 0.0) {
+                                            Surface(
+                                                color = NaturalPrimary.copy(alpha = 0.15f),
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
                                                 Text(
-                                                    breakdown,
+                                                    "FREE",
+                                                    color = NaturalPrimary,
+                                                    fontWeight = FontWeight.ExtraBold,
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = TextSecondary
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        } else if (calculatedDeliveryFee != null) {
+                                            Text(
+                                                "₹${"%.0f".format(calculatedDeliveryFee)}",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = TextPrimary
+                                            )
+                                        }
+                                    }
+
+                                    if (deliveryFeeError != null) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = deliveryFeeError!!,
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.clickable { calculateFees() }
+                                        )
+                                    }
+
+                                    if (addressDistanceKm != null && addressDistanceKm!! > 0.0) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.Navigation,
+                                                contentDescription = null,
+                                                tint = TextSecondary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                "Distance: ~${"%.1f".format(distanceKm)} km from ${if (isHotel) "hotel" else "city dispatch hub"}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = TextSecondary
+                                            )
+                                        }
+                                    }
+
+                                    // Free-delivery hint
+                                    if (freeDeliveryMinOrder > 0.0) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        val isFreeUnlocked = subtotalAfterDiscount >= freeDeliveryMinOrder
+                                        val neededMore = (freeDeliveryMinOrder - subtotalAfterDiscount).coerceAtLeast(0.0)
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isFreeUnlocked) PastelSage else PastelPeach.copy(alpha = 0.7f),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isFreeUnlocked) Icons.Default.CheckCircle else Icons.Default.Info,
+                                                    contentDescription = null,
+                                                    tint = if (isFreeUnlocked) DarkGreenText else Color(0xFFBF360C),
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = if (isFreeUnlocked) {
+                                                        "FREE Express Delivery unlocked! (Order > ₹${"%.0f".format(freeDeliveryMinOrder)})"
+                                                    } else {
+                                                        "Add ₹${"%.0f".format(neededMore)} more for FREE Express Delivery"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (isFreeUnlocked) DarkGreenText else Color(0xFFBF360C),
+                                                    fontWeight = FontWeight.SemiBold
                                                 )
                                             }
                                         }
@@ -1391,10 +1155,17 @@ fun CheckoutScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Delivery Fee", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
-                            if (isLoadingDeliverySettings) {
+                            if (isLoadingDeliveryFee) {
                                 Text("Calculating...", style = MaterialTheme.typography.bodySmall, color = TextMuted)
                             } else if (!isDeliveryAvailable) {
                                 Text("Unavailable", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            } else if (deliveryFeeError != null) {
+                                Text(
+                                    "Error (tap to retry)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.clickable { calculateFees() }
+                                )
                             } else if (calculatedDeliveryFee == 0.0) {
                                 Text("FREE", color = NaturalPrimary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                             } else if (calculatedDeliveryFee != null) {

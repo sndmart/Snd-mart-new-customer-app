@@ -69,7 +69,7 @@ fun HomeScreen(
     onCityChangeRequested: () -> Unit,
     onNavigateToCart: () -> Unit,
     onNavigateToHotelMenu: (vendorId: String, vendorName: String) -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSettings: (() -> Unit)? = null,
     onNavigateToNotifications: (() -> Unit)? = null,
     onProceedToCheckout: (isHotel: Boolean) -> Unit = {}
 ) {

@@ -21,7 +21,13 @@ object GoogleMapsConfig {
         }
 
     val isConfigured: Boolean
-        get() = apiKey.isNotBlank() && apiKey != DEFAULT_API_KEY
+        get() {
+            val configured = apiKey.isNotBlank() && apiKey != DEFAULT_API_KEY
+            if (!configured && BuildConfig.DEBUG) {
+                Log.w("GoogleMapsConfig", "Google Maps API Key is missing or using placeholder ('$DEFAULT_API_KEY'). Maps and Places features will be disabled until a valid GOOGLE_MAPS_API_KEY is supplied.")
+            }
+            return configured
+        }
 
     /**
      * Initializes Google Places SDK once with application context.
@@ -29,7 +35,13 @@ object GoogleMapsConfig {
      */
     fun initializePlaces(context: Context) {
         try {
-            if (isConfigured && !Places.isInitialized()) {
+            if (!isConfigured) {
+                if (BuildConfig.DEBUG) {
+                    Log.w("GoogleMapsConfig", "Skipping Places SDK initialization: Google Maps API key is not configured.")
+                }
+                return
+            }
+            if (!Places.isInitialized()) {
                 Places.initialize(context.applicationContext, apiKey)
             }
         } catch (e: Throwable) {

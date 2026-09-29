@@ -21,6 +21,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -179,36 +183,28 @@ class SndmartRepository(
     }
 
     // --- SESSION MANAGEMENT ---
-    suspend fun refreshSession(): Result<SupabaseAuthResponse> {
+    suspend fun refreshSession(): Result<Boolean> {
         val refreshToken = sessionManager.getRefreshToken()
         if (refreshToken.isNullOrBlank()) {
             sessionManager.notifySessionExpired("Your session expired, please log in again")
             return Result.failure(SessionExpiredException("No refresh token stored"))
         }
-        return try {
-            val response = api.refreshSession(mapOf("refresh_token" to refreshToken))
-            if (response.isSuccessful && response.body() != null) {
-                val auth = response.body()!!
-                val newAccessToken = auth.accessToken
-                val newRefreshToken = auth.refreshToken ?: refreshToken
-                if (!newAccessToken.isNullOrBlank()) {
-                    sessionManager.updateTokens(newAccessToken, newRefreshToken, auth.expiresIn)
-                    Log.i(TAG, "Session refreshed successfully via SndmartRepository.")
-                    Result.success(auth)
-                } else {
-                    sessionManager.notifySessionExpired("Your session expired, please log in again")
-                    Result.failure(SessionExpiredException("Empty access token in refresh response"))
-                }
-            } else {
-                val code = response.code()
-                val error = SupabaseClient.parseErrorMessage(response)
-                Log.w(TAG, "Refresh session failed HTTP $code: $error")
-                sessionManager.notifySessionExpired("Your session expired, please log in again")
-                Result.failure(SessionExpiredException("Session expired: $error"))
+        val outcome = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            SupabaseClient.refreshTokensBlocking()
+        }
+        return when (outcome) {
+            SupabaseClient.RefreshOutcome.SUCCESS -> {
+                Log.i(TAG, "Session refreshed successfully via SupabaseClient.")
+                Result.success(true)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during refreshSession: ${e.message}", e)
-            Result.failure(e)
+            SupabaseClient.RefreshOutcome.INVALID -> {
+                sessionManager.notifySessionExpired("Your session expired, please log in again")
+                Result.failure(SessionExpiredException("Session expired, please log in again"))
+            }
+            SupabaseClient.RefreshOutcome.NETWORK_ERROR -> {
+                Log.w(TAG, "Session refresh failed due to network error; not expiring session.")
+                Result.failure(java.io.IOException("Network error during session refresh"))
+            }
         }
     }
 
@@ -313,6 +309,8 @@ class SndmartRepository(
                 Log.w(TAG, "Failed to fetch cities from backend: $error")
                 Result.failure(Exception(error))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Exception fetching cities from backend: ${e.message}", e)
             Result.failure(e)
@@ -339,6 +337,8 @@ class SndmartRepository(
                 Log.w(TAG, "find_city_for_location RPC failed: $error")
                 Result.failure(Exception(error))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Exception calling find_city_for_location: ${e.message}", e)
             Result.failure(e)
@@ -361,6 +361,8 @@ class SndmartRepository(
                 Log.e(TAG, "getCities failed HTTP ${response.code()}: $error")
                 Result.failure(Exception(error))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Exception fetching cities: ${e.message}", e)
             Result.failure(e)
@@ -381,6 +383,8 @@ class SndmartRepository(
                 Log.w(TAG, "find_city_for_location RPC failed: $error")
                 Result.failure(Exception(error))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Exception calling find_city_for_location: ${e.message}", e)
             Result.failure(e)
@@ -552,8 +556,7 @@ class SndmartRepository(
      */
     suspend fun signOut(scope: String? = null): Result<Unit> {
         if (!SupabaseClient.isKeyConfigured()) {
-            clearCartDirectly(isHotel = true)
-            clearCartDirectly(isHotel = false)
+            resetInMemoryCart()
             return Result.success(Unit)
         }
         return try {
@@ -561,8 +564,7 @@ class SndmartRepository(
 
             // Always clear in-memory cart state on sign-out, regardless of API result,
             // so no leftover items can leak into the next user's session on this device.
-            clearCartDirectly(isHotel = true)
-            clearCartDirectly(isHotel = false)
+            resetInMemoryCart()
 
             if (res.isSuccessful) {
                 Result.success(Unit)
@@ -573,8 +575,7 @@ class SndmartRepository(
             Log.w(TAG, "Exception during signOut(scope=$scope): ${e.message}")
             // Still clear cart state even if the network call itself failed -
             // the user is leaving this session either way.
-            clearCartDirectly(isHotel = true)
-            clearCartDirectly(isHotel = false)
+            resetInMemoryCart()
             Result.failure(e)
         }
     }
@@ -912,18 +913,19 @@ class SndmartRepository(
         val variants = prod.productVariants?.filter { it.isActive } ?: return emptyList()
         val list = mutableListOf<ResolvedVariant>()
         for (v in variants) {
-            val stockRow = v.cityStock?.firstOrNull { it.cityId == cityId || it.cityId.isNullOrBlank() }
-            if (stockRow != null) {
-                list.add(
-                    ResolvedVariant(
-                        id = v.id,
-                        label = v.label,
-                        price = stockRow.price,
-                        stockQty = stockRow.stockQty ?: 0,
-                        isAvailable = stockRow.isAvailable
-                    )
+            val stockRow = v.cityStock?.firstOrNull { it.cityId == cityId }
+            val isAvail = stockRow?.isAvailable == true
+            val price = stockRow?.price ?: 0.0
+            val stockQty = if (isAvail) (stockRow?.stockQty ?: 0) else 0
+            list.add(
+                ResolvedVariant(
+                    id = v.id,
+                    label = v.label,
+                    price = price,
+                    stockQty = stockQty,
+                    isAvailable = isAvail
                 )
-            }
+            )
         }
         return list.sortedBy { it.price }
     }
@@ -994,6 +996,7 @@ class SndmartRepository(
 
             // Rule 3: Single batch request for ONLY the products returned on this page
             val productIds = products.map { it.id }.filter { it.isNotBlank() }
+            var stockLoadFailed = false
             val stockMap = if (productIds.isNotEmpty()) {
                 val stockResponse = api.getProductCityStockBatch(
                     cityId = "eq.$cityId",
@@ -1003,6 +1006,7 @@ class SndmartRepository(
                 if (stockResponse.isSuccessful && stockResponse.body() != null) {
                     stockResponse.body()!!.associateBy { it.productId }
                 } else {
+                    stockLoadFailed = !stockResponse.isSuccessful
                     emptyMap()
                 }
             } else {
@@ -1011,10 +1015,15 @@ class SndmartRepository(
 
             val resolved = products.map { prod ->
                 val override = stockMap[prod.id]
+                val isGrocery = prod.vendorId == null
                 val price = override?.price ?: prod.price
                 val mrp = override?.mrp ?: prod.mrp
-                val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
-                val isAvail = override?.isAvailable ?: prod.isAvailable
+                val stock = if (isGrocery) (override?.stockQty ?: 0) else (override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0)))
+                val isAvail = if (isGrocery) {
+                    if (stockLoadFailed) false else (override?.isAvailable == true)
+                } else {
+                    override?.isAvailable ?: prod.isAvailable
+                }
                 val resVariants = resolveProductVariants(prod, cityId)
                 ResolvedProduct(
                     baseProduct = prod,
@@ -1177,13 +1186,14 @@ class SndmartRepository(
                 val mrp = override?.mrp ?: prod.mrp
                 val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
                 val isAvail = override?.isAvailable ?: prod.isAvailable
+                val resVariants = resolveProductVariants(prod, cityId)
                 ResolvedProduct(
                     baseProduct = prod,
                     effectivePrice = price,
                     effectiveMrp = mrp,
                     effectiveStock = stock,
                     effectiveIsAvailable = isAvail,
-                    variants = emptyList()
+                    variants = resVariants
                 )
             }.sortedWith(
                 compareBy<ResolvedProduct> { prod ->
@@ -1229,7 +1239,7 @@ class SndmartRepository(
                     api.getProducts(
                         isActive = "eq.true",
                         vendorId = "eq.$vendorId",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,is_veg,food_type,available_from,available_until",
                         order = "is_featured.desc"
                     )
                 }
@@ -1282,12 +1292,14 @@ class SndmartRepository(
                 val mrp = override?.mrp ?: prod.mrp
                 val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
                 val isAvail = override?.isAvailable ?: prod.isAvailable
+                val resVariants = resolveProductVariants(prod, cityId)
                 ResolvedProduct(
                     baseProduct = prod,
                     effectivePrice = price,
                     effectiveMrp = mrp,
                     effectiveStock = stock,
-                    effectiveIsAvailable = isAvail
+                    effectiveIsAvailable = isAvail,
+                    variants = resVariants
                 )
             }.sortedWith(
                 compareBy<ResolvedProduct> { prod ->
@@ -1311,12 +1323,16 @@ class SndmartRepository(
     // Rule: Every render: re-fetch current price per item fresh — never trust a previously-fetched price.
     // Rule 3 & 4: Batch fetch products and city stock overrides in parallel instead of looping N times!
     suspend fun getFreshCartItems(isHotel: Boolean, cityId: String): Result<List<CartItemUi>> {
-        return try {
-            val rawCart = if (isHotel) _hotelCart.value else _groceryCart.value
-            if (rawCart.isEmpty()) {
-                return Result.success(emptyList())
-            }
+        val rawCart = (if (isHotel) _hotelCart.value else _groceryCart.value).filter { it.quantity > 0 }
+        if (rawCart.isEmpty()) {
+            return Result.success(emptyList())
+        }
 
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.failure(Exception("Service not configured"))
+        }
+
+        return try {
             val productIds = rawCart.map { it.productId }.filter { it.isNotBlank() }.distinct()
             if (productIds.isEmpty()) {
                 return Result.success(emptyList())
@@ -1354,10 +1370,11 @@ class SndmartRepository(
                 val prod = productsMap[item.productId]
                 if (prod != null) {
                     val override = stockMap[prod.id]
+                    val isGrocery = prod.vendorId == null
                     val price = override?.price ?: prod.price
                     val mrp = override?.mrp ?: prod.mrp
-                    val stock = override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0))
-                    val isAvail = override?.isAvailable ?: prod.isAvailable
+                    val stock = if (isGrocery) (override?.stockQty ?: 0) else (override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0)))
+                    val isAvail = if (isGrocery) (override?.isAvailable == true) else (override?.isAvailable ?: prod.isAvailable)
                     val resVariants = resolveProductVariants(prod, cityId)
                     resolvedProd = ResolvedProduct(
                         baseProduct = prod,
@@ -1372,22 +1389,15 @@ class SndmartRepository(
                     }
                 }
 
-                if (resolvedProd == null) {
-                    resolvedProd = findFallbackProduct(item.productId)
-                }
-
                 if (resolvedProd != null) {
                     list.add(CartItemUi(cartItem = item, product = resolvedProd, variant = resolvedVariant))
                 }
             }
             Result.success(list)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Log.e(TAG, "Exception getting fresh cart items", e)
-            val cartSnapshot = if (isHotel) _hotelCart.value else _groceryCart.value
-            val fallbackList = cartSnapshot.mapNotNull { item ->
-                findFallbackProduct(item.productId)?.let { CartItemUi(cartItem = item, product = it) }
-            }
-            Result.success(fallbackList)
+            Result.failure(e)
         }
     }
 
@@ -1398,20 +1408,40 @@ class SndmartRepository(
     // Prices are NEVER stored in cart_items — they are always re-fetched fresh
     // (see getFreshCartItems); cart_items only holds user_id/product_id/variant_id/
     // vendor_id/city_id/quantity.
+    private val cartWriteMutex = Mutex()
+
+    private suspend fun writeCartSnapshot(userId: String, snapshot: List<CartItem>) {
+        cartWriteMutex.withLock {
+            // Once the delete starts, the write must finish - never cancel between delete and insert
+            withContext(NonCancellable) {
+                val del = api.clearCartForUser(userIdQuery = "eq.$userId")
+                if (!del.isSuccessful) {
+                    Log.w(TAG, "Cart clear failed: HTTP ${del.code()}")
+                    return@withContext
+                }
+                if (snapshot.isNotEmpty()) {
+                    val ins = api.insertCartItemsBulk(snapshot.map { it.copy(id = null) })
+                    if (!ins.isSuccessful) {
+                        Log.w(TAG, "Cart bulk insert failed: HTTP ${ins.code()}")
+                    }
+                }
+            }
+        }
+    }
+
     private fun persistCartToBackend() {
         if (!SupabaseClient.isKeyConfigured()) return
         val userId = sessionManager.userId.value ?: return
-        val snapshot = _groceryCart.value + _hotelCart.value
         persistJob?.cancel()
         persistJob = cartSyncScope.launch {
             try {
-                delay(300) // coalesce rapid stepper taps into one write
-                api.clearCartForUser(userIdQuery = "eq.$userId")
-                for (item in snapshot) {
-                    api.insertCartItem(item.copy(id = null))
-                }
+                delay(300) // only this part is cancellable - coalesces rapid taps
             } catch (e: CancellationException) {
-                // Debounce cancellation when user rapidly updates cart - normal lifecycle, ignore
+                return@launch
+            }
+            val latest = _groceryCart.value + _hotelCart.value // read latest state after the debounce
+            try {
+                writeCartSnapshot(userId, latest)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to persist cart to backend: ${e.message}")
             }
@@ -1548,21 +1578,32 @@ class SndmartRepository(
     }
 
     suspend fun clearCartDirectly(isHotel: Boolean) {
-        if (isHotel) {
-            _hotelCart.value = emptyList()
-        } else {
-            _groceryCart.value = emptyList()
-        }
+        if (isHotel) _hotelCart.value = emptyList() else _groceryCart.value = emptyList()
         val userId = sessionManager.userId.value ?: return
-        if (SupabaseClient.isKeyConfigured()) {
-            try {
-                val remaining = _groceryCart.value + _hotelCart.value
-                api.clearCartForUser(userIdQuery = "eq.$userId")
-                for (item in remaining) {
-                    api.insertCartItem(item.copy(id = null))
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to clear cart items on backend: ${e.message}")
+        if (!SupabaseClient.isKeyConfigured()) return
+        persistJob?.cancel()
+        try {
+            writeCartSnapshot(userId, _groceryCart.value + _hotelCart.value)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to clear cart items on backend: ${e.message}")
+        }
+    }
+
+    fun resetInMemoryCart() {
+        persistJob?.cancel()
+        _groceryCart.value = emptyList()
+        _hotelCart.value = emptyList()
+    }
+
+    fun clearCartInMemory(isHotel: Boolean? = null) {
+        if (isHotel == null) {
+            resetInMemoryCart()
+        } else {
+            persistJob?.cancel()
+            if (isHotel) {
+                _hotelCart.value = emptyList()
+            } else {
+                _groceryCart.value = emptyList()
             }
         }
     }
@@ -1579,71 +1620,25 @@ class SndmartRepository(
         return g + h
     }
 
-    // --- DELIVERY SLOTS & COUPONS ---
-    // Fallback slot configurations matching the city's delivery slot setup if backend table query lacks select permissions
-    fun getCityDefaultSlots(cityId: String): List<DeliverySlot> {
-        val cleanCityId = cityId.removePrefix("eq.")
-        return listOf(
-            DeliverySlot(
-                id = "b0000001-0000-0000-0000-000000000001",
-                cityId = cleanCityId,
-                name = "Morning (9 AM - 12 PM)",
-                startTime = "09:00",
-                endTime = "12:00",
-                start = "09:00",
-                end = "12:00",
-                minOrderAmount = 0.0,
-                isFreeDelivery = false,
-                deliveryFee = 30.0,
-                isActive = true
-            ),
-            DeliverySlot(
-                id = "b0000001-0000-0000-0000-000000000002",
-                cityId = cleanCityId,
-                name = "Afternoon (12 PM - 4 PM)",
-                startTime = "12:00",
-                endTime = "16:00",
-                start = "12:00",
-                end = "16:00",
-                minOrderAmount = 0.0,
-                isFreeDelivery = false,
-                deliveryFee = 30.0,
-                isActive = true
-            ),
-            DeliverySlot(
-                id = "b0000001-0000-0000-0000-000000000003",
-                cityId = cleanCityId,
-                name = "Evening (4 PM - 9 PM)",
-                startTime = "16:00",
-                endTime = "21:00",
-                start = "16:00",
-                end = "21:00",
-                minOrderAmount = 199.0,
-                isFreeDelivery = true,
-                deliveryFee = 30.0,
-                isActive = true
-            )
-        )
-    }
+    // --- ONE DELIVERY SYSTEM: "Express Delivery" Only ---
 
-    suspend fun getDeliverySlots(cityId: String): Result<List<DeliverySlot>> {
+    suspend fun getCityDeliverySettings(cityId: String): Result<CityDeliverySettings?> {
+        val cleanCityId = cityId.removePrefix("eq.")
         if (!SupabaseClient.isKeyConfigured()) {
-            return Result.success(getCityDefaultSlots(cityId))
+            return Result.success(CityDeliverySettings(cityId = cleanCityId, freeDeliveryMinOrderAmount = 99.0, expressDeliveryMinutes = 30))
         }
         return try {
-            val queryCityId = if (cityId.startsWith("eq.")) cityId else "eq.$cityId"
-            val response = api.getDeliverySlots(cityId = queryCityId, order = "start_time.asc")
-            if (response.isSuccessful && response.body() != null) {
-                val slots = response.body()!!.filter { it.isActive != false }
-                Result.success(slots)
+            val response = api.getCityDeliverySettings(cityId = "eq.$cleanCityId")
+            if (response.isSuccessful && !response.body().isNullOrEmpty()) {
+                Result.success(response.body()!!.firstOrNull())
             } else {
-                val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                Log.w(TAG, "Delivery slots unavailable from backend ($err)")
-                Result.success(emptyList())
+                Result.success(null)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Exception fetching delivery slots: ${e.message}")
-            Result.success(emptyList())
+            Log.w(TAG, "Exception getting city delivery settings: ${e.message}")
+            Result.failure(e)
         }
     }
 
@@ -1655,39 +1650,134 @@ class SndmartRepository(
         return try {
             val response = api.getCityDeliverySettings(cityId = "eq.$cleanCityId")
             if (response.isSuccessful && !response.body().isNullOrEmpty()) {
-                val settings = response.body()!!.firstOrNull { it.isActive != false } ?: response.body()!!.first()
-                settings.freeDeliveryMinOrderAmount ?: settings.freeDeliveryMinOrder
+                val settings = response.body()!!.first()
+                settings.effectiveFreeDeliveryMinOrder
             } else {
-                // Fallback to express delivery settings if city_delivery_settings is not configured
-                val express = getExpressDeliverySettings(cleanCityId).getOrNull()
-                express?.freeDeliveryMinOrder
+                null
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Exception getting free delivery threshold: ${e.message}")
-            val express = getExpressDeliverySettings(cleanCityId).getOrNull()
-            express?.freeDeliveryMinOrder
+            null
         }
     }
 
-    suspend fun getExpressDeliverySettings(cityId: String): Result<ExpressDeliverySettings?> {
+    suspend fun calculateDeliveryFee(
+        cityId: String,
+        distanceKm: Double,
+        subtotalAfterDiscount: Double
+    ): Result<Double> {
+        val cleanCityId = cityId.removePrefix("eq.")
         if (!SupabaseClient.isKeyConfigured()) {
-            return Result.success(null)
+            // Sindhanur formula: free if order after discount >= Rs 99 AND distance <= 5 km;
+            // otherwise Rs 30 for the first 3 km + Rs 10 per extra km; capped at Rs 500
+            val fee = if (subtotalAfterDiscount >= 99.0 && distanceKm <= 5.0) {
+                0.0
+            } else {
+                val base = 30.0
+                val extra = if (distanceKm > 3.0) (distanceKm - 3.0) * 10.0 else 0.0
+                (base + extra).coerceAtMost(500.0)
+            }
+            return Result.success(fee)
         }
         return try {
-            val queryCityId = if (cityId.startsWith("eq.")) cityId else "eq.$cityId"
-            val response = api.getExpressDeliverySettings(cityId = queryCityId)
+            val body = mapOf(
+                "p_city_id" to cleanCityId,
+                "p_distance_km" to distanceKm,
+                "p_subtotal" to subtotalAfterDiscount
+            )
+            val response = api.calculateDeliveryFee(body)
             if (response.isSuccessful && response.body() != null) {
-                val settings = response.body()!!.firstOrNull { it.isActive }
-                Result.success(settings)
+                Result.success(response.body()!!)
             } else {
-                val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                Log.w(TAG, "Express delivery settings unavailable: $err")
-                Result.success(null)
+                val error = SupabaseClient.parseErrorMessage(response)
+                Log.w(TAG, "calculate_delivery_fee failed: $error")
+                Result.failure(Exception(error))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Exception fetching express delivery settings: ${e.message}", e)
-            Result.success(null)
+            Log.w(TAG, "Exception calling calculate_delivery_fee: ${e.message}", e)
+            Result.failure(e)
         }
+    }
+
+    suspend fun getHandlingFee(cityId: String): Result<Double> {
+        val cleanCityId = cityId.removePrefix("eq.")
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.success(5.0)
+        }
+        return try {
+            val body = mapOf("p_city_id" to cleanCityId)
+            val response = api.getHandlingFee(body)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.success(5.0)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception calling get_handling_fee: ${e.message}", e)
+            Result.success(5.0)
+        }
+    }
+
+    /**
+     * Distance calculation exactly like the server:
+     * - Grocery cart: pickup = delivery_zones (city, is_active = true, oldest created_at) center_latitude, center_longitude.
+     * - Hotel cart: pickup = hotel vendors.latitude, vendors.longitude.
+     * - distanceKm = sqrt((addrLat - pickupLat)^2 + (addrLng - pickupLng)^2) * 111.0; use 0.0 if any coordinate is missing.
+     */
+    suspend fun resolveServerDistanceKm(
+        address: CustomerAddress?,
+        cityId: String?,
+        vendorId: String?,
+        isHotel: Boolean
+    ): Double {
+        if (address == null || address.lat == null || address.lng == null) {
+            return 0.0
+        }
+        val addrLat = address.lat
+        val addrLng = address.lng
+        if (addrLat == 0.0 && addrLng == 0.0) return 0.0
+
+        val cleanCityId = cityId?.removePrefix("eq.")?.trim()
+        val cleanVendorId = vendorId?.removePrefix("eq.")?.trim()
+
+        val pickupCoords: Pair<Double, Double>? = if (isHotel && !cleanVendorId.isNullOrBlank()) {
+            val vendor = getVendor(cleanVendorId).getOrNull()
+            if (vendor?.latitude != null && vendor.longitude != null) {
+                Pair(vendor.latitude, vendor.longitude)
+            } else null
+        } else if (!cleanCityId.isNullOrBlank()) {
+            val zonesRes = try {
+                if (SupabaseClient.isKeyConfigured()) {
+                    api.getDeliveryZones(cityId = "eq.$cleanCityId")
+                } else null
+            } catch (e: Exception) {
+                null
+            }
+            val activeZone = zonesRes?.body()?.filter { it.isActive != false }?.minByOrNull { it.createdAt ?: "" }
+            if (activeZone?.centerLatitude != null && activeZone.centerLongitude != null) {
+                Pair(activeZone.centerLatitude, activeZone.centerLongitude)
+            } else {
+                val city = getCity(cleanCityId).getOrNull()
+                if (city?.centerLat != null && city.centerLng != null) {
+                    Pair(city.centerLat, city.centerLng)
+                } else null
+            }
+        } else null
+
+        if (pickupCoords == null) return 0.0
+        val pickupLat = pickupCoords.first
+        val pickupLng = pickupCoords.second
+
+        val dLat = addrLat - pickupLat
+        val dLng = addrLng - pickupLng
+        val dist = kotlin.math.sqrt(dLat * dLat + dLng * dLng) * 111.0
+        return dist.coerceAtLeast(0.0)
     }
 
     suspend fun getCity(cityId: String): Result<City?> {
@@ -1704,6 +1794,8 @@ class SndmartRepository(
             } else {
                 Result.success(cached)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Exception fetching city $cleanId: ${e.message}", e)
             Result.success(cached)
@@ -1798,57 +1890,6 @@ class SndmartRepository(
         return 1.0
     }
 
-    suspend fun getCustomerDeliveryOptions(cityId: String): Result<CustomerDeliveryOptions> {
-        if (!SupabaseClient.isKeyConfigured()) {
-            return Result.failure(Exception("Supabase API key is not configured"))
-        }
-        return try {
-            val cleanCityId = if (cityId.startsWith("eq.")) cityId.removePrefix("eq.") else cityId
-            val response = api.getCustomerDeliveryOptions(mapOf("p_city_id" to cleanCityId))
-            if (response.isSuccessful && response.body() != null) {
-                Result.success(response.body()!!)
-            } else {
-                val err = SupabaseClient.parseErrorMessage(response)
-                Log.w(TAG, "Failed to get customer delivery options: $err")
-                Result.failure(Exception(err))
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Exception getting customer delivery options: ${e.message}", e)
-            Result.failure(e)
-        }
-    }
-
-    suspend fun calculateCityDeliveryCharge(
-        cityId: String,
-        deliveryType: String,
-        distanceKm: Double,
-        orderAmount: Double
-    ): Result<DeliveryChargeResult> {
-        if (!SupabaseClient.isKeyConfigured()) {
-            return Result.failure(Exception("Supabase API key is not configured"))
-        }
-        return try {
-            val cleanCityId = if (cityId.startsWith("eq.")) cityId.removePrefix("eq.") else cityId
-            val payload = mapOf(
-                "p_city_id" to cleanCityId,
-                "p_delivery_type" to deliveryType,
-                "p_distance_km" to distanceKm,
-                "p_order_amount" to orderAmount
-            )
-            val response = api.calculateCityDeliveryCharge(payload)
-            if (response.isSuccessful && response.body() != null) {
-                Result.success(response.body()!!)
-            } else {
-                val err = SupabaseClient.parseErrorMessage(response)
-                Log.w(TAG, "calculate_city_delivery_charge failed: $err")
-                Result.failure(Exception(err))
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Exception in calculate_city_delivery_charge: ${e.message}", e)
-            Result.failure(e)
-        }
-    }
-
     suspend fun validateAndApplyCoupon(
         code: String,
         cityId: String,
@@ -1913,7 +1954,9 @@ class SndmartRepository(
                 )
             }
 
-            var discount = if (coupon.discountType == "percentage") {
+            val isPercent = coupon.discountType.equals("percent", ignoreCase = true) ||
+                            coupon.discountType.equals("percentage", ignoreCase = true)
+            var discount = if (isPercent) {
                 (subtotal * coupon.discountValue) / 100.0
             } else {
                 coupon.discountValue
@@ -1938,31 +1981,36 @@ class SndmartRepository(
 
     suspend fun getCoupons(cityId: String): Result<List<Coupon>> {
         if (!SupabaseClient.isKeyConfigured()) {
-            return Result.success(DemoCatalog.COUPONS)
+            return Result.failure(Exception("Service not configured"))
         }
         return try {
             val response = api.getCoupons(cityId = "eq.$cityId")
             if (response.isSuccessful && response.body() != null) {
                 Result.success(response.body()!!)
             } else {
-                Result.success(DemoCatalog.COUPONS)
+                Result.failure(Exception(SupabaseClient.parseErrorMessage(response)))
             }
         } catch (e: Exception) {
-            Result.success(DemoCatalog.COUPONS)
+            if (e is CancellationException) throw e
+            Result.failure(e)
         }
     }
 
     // Look up a single active coupon by code for a city (server-side filter).
     suspend fun getCouponByCode(code: String, cityId: String): Result<Coupon?> {
         if (!SupabaseClient.isKeyConfigured()) {
-            return Result.success(DemoCatalog.COUPONS.find { it.code.equals(code, ignoreCase = true) })
+            return Result.failure(Exception("Service not configured"))
         }
         return try {
             val response = api.getCoupons(cityId = "eq.$cityId", code = "eq.$code")
-            val remote = response.body()?.firstOrNull()
-            Result.success(remote ?: DemoCatalog.COUPONS.find { it.code.equals(code, ignoreCase = true) })
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.firstOrNull())
+            } else {
+                Result.failure(Exception(SupabaseClient.parseErrorMessage(response)))
+            }
         } catch (e: Exception) {
-            Result.success(DemoCatalog.COUPONS.find { it.code.equals(code, ignoreCase = true) })
+            if (e is CancellationException) throw e
+            Result.failure(e)
         }
     }
 
@@ -2118,12 +2166,8 @@ class SndmartRepository(
         vendorId: String?,
         cityId: String,
         addressId: String,
-        slotId: String?,
         paymentMethod: String,
-        coupon: Coupon? = null,
-        deliveryType: String = "free_slot",
-        deliveryDistanceKm: Double? = null,
-        deliveryOptionSnapshot: Map<String, Any?>? = null
+        coupon: Coupon? = null
     ): Result<Order> {
         return try {
             val rawCart = (if (isHotel) _hotelCart.value else _groceryCart.value).filter { it.quantity > 0 }
@@ -2136,27 +2180,19 @@ class SndmartRepository(
                 return Result.failure(Exception("Please select a delivery address"))
             }
 
+            if (paymentMethod.lowercase().trim() == "card") {
+                return Result.failure(Exception("Card payment is not available. Please choose UPI or Cash on Delivery."))
+            }
+
             val mappedPaymentMethod = when (paymentMethod.lowercase().trim()) {
                 "cod", "cash" -> "cash"
                 "upi" -> "upi"
-                "card" -> "card"
-                "online" -> "online"
                 else -> "cash"
             }
 
             // Demo fallback if Supabase key is unconfigured
             if (!SupabaseClient.isKeyConfigured()) {
-                val demoOrder = Order(
-                    id = "demo-order-${System.currentTimeMillis()}",
-                    orderNumber = "SND-DEMO-${System.currentTimeMillis().toString().takeLast(6)}",
-                    customerId = userId,
-                    vendorId = vendorId,
-                    addressId = cleanAddressId,
-                    paymentMethod = mappedPaymentMethod,
-                    status = "confirmed"
-                )
-                clearCartDirectly(isHotel)
-                return Result.success(demoOrder)
+                return Result.failure(Exception("Service not configured"))
             }
 
             // Re-check maintenance mode right before checkout
@@ -2192,6 +2228,12 @@ class SndmartRepository(
                 put("p_payment_method", mappedPaymentMethod)
                 put("p_items", itemsArray)
                 put("p_notes", JSONObject.NULL)
+                val couponCode = coupon?.code?.trim()?.uppercase()
+                if (!couponCode.isNullOrBlank()) {
+                    put("p_coupon_code", couponCode)
+                } else {
+                    put("p_coupon_code", JSONObject.NULL)
+                }
             }
 
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
@@ -2202,19 +2244,12 @@ class SndmartRepository(
                 val placedOrder = rpcResult.getOrNull()!!
                 // Clear the checked-out cart_items rows directly from backend & memory
                 clearCartDirectly(isHotel)
-
-                if (coupon != null && coupon.code.isNotBlank() && !placedOrder.id.isNullOrBlank()) {
-                    try {
-                        recordCouponUsage(coupon.id, userId, placedOrder.id)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Coupon usage recording skipped: ${e.message}")
-                    }
-                }
-
                 Result.success(placedOrder)
             } else {
                 Result.failure(rpcResult.exceptionOrNull() ?: Exception("Failed to place order"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Exception during placeOrder", e)
             Result.failure(e)
@@ -2316,8 +2351,10 @@ class SndmartRepository(
                     paymentMethod = obj.optString("payment_method", "cash"),
                     paymentStatus = obj.optString("payment_status", "pending"),
                     subtotal = obj.optDouble("subtotal", 0.0),
-                    totalAmount = obj.optDouble("total_amount", 0.0),
+                    discountAmount = obj.optDouble("discount_amount", 0.0),
                     deliveryFee = obj.optDouble("delivery_fee", 0.0),
+                    handlingFee = obj.optDouble("handling_fee", 0.0),
+                    totalAmount = obj.optDouble("total_amount", 0.0),
                     placedAt = if (obj.has("placed_at") && !obj.isNull("placed_at")) obj.optString("placed_at") else null
                 )
             } else {
@@ -2613,7 +2650,8 @@ class SndmartRepository(
                 val prod = productsMap[item.productId]
                 if (prod != null) {
                     val override = stockMap[prod.id]
-                    val isAvail = override?.isAvailable ?: prod.isAvailable
+                    val isGrocery = prod.vendorId == null
+                    val isAvail = if (isGrocery) (override?.isAvailable == true) else (override?.isAvailable ?: prod.isAvailable)
                     if (prod.isActive && isAvail) {
                         val isHotel = item.vendorId != null
                         val result = addToCart(
@@ -2721,6 +2759,23 @@ class SndmartRepository(
         }
     }
 
+    suspend fun getWalletBalance(customerId: String): Result<Double> {
+        return try {
+            val res = api.getWalletAmountsForBalance(customerId = "eq.$customerId")
+            if (res.isSuccessful && res.body() != null) {
+                val balance = res.body()!!.fold(0.0) { acc, t ->
+                    if (t.type.lowercase() == "credit") acc + t.amount else acc - t.amount
+                }
+                Result.success(balance.coerceAtLeast(0.0))
+            } else {
+                Result.failure(Exception(SupabaseClient.parseErrorMessage(res)))
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Result.failure(e)
+        }
+    }
+
     // --- DEVICE TOKENS (PUSH NOTIFICATIONS) ---
     suspend fun registerCustomerFcmToken(token: String): Result<Unit> {
         val userId = sessionManager.userId.value ?: sessionManager.getUserId()
@@ -2762,8 +2817,6 @@ class SndmartRepository(
             val response = api.getCustomerNotifications(userIdQuery = "eq.$userId", limit = limit, offset = offset)
             if (response.isSuccessful) {
                 val list = response.body() ?: emptyList()
-                val unread = list.count { !it.isRead }
-                sessionManager.setUnreadNotificationCount(unread)
                 Result.success(list)
             } else {
                 val error = SupabaseClient.parseErrorMessage(response)
@@ -2810,16 +2863,14 @@ class SndmartRepository(
 
     suspend fun refreshUnreadNotificationCount(userId: String) {
         try {
-            val response = api.getCustomerNotifications(
-                userIdQuery = "eq.$userId",
-                limit = 100
-            )
-            if (response.isSuccessful) {
-                val unread = (response.body() ?: emptyList()).count { !it.isRead }
-                sessionManager.setUnreadNotificationCount(unread)
+            val res = api.countUnreadNotifications(userId = "eq.$userId")
+            val total = res.headers()["Content-Range"]?.substringAfter("/")?.toIntOrNull()
+            if (res.isSuccessful && total != null) {
+                sessionManager.setUnreadNotificationCount(total)
             }
         } catch (e: Exception) {
-            // Ignored
+            if (e is CancellationException) throw e
+            Log.w(TAG, "Unread count refresh failed: ${e.message}")
         }
     }
 
@@ -2882,12 +2933,12 @@ class SndmartRepository(
                     val minVersion = versionInfo.minimumSupportedVersion
                     val isBelowMinimum = !minVersion.isNullOrBlank() &&
                             VersionUtils.compareVersions(VersionUtils.CURRENT_APP_VERSION, minVersion) < 0
-                    if (isBelowMinimum || versionInfo.forceUpdate) {
+                    val isForceUpdate = versionInfo.forceUpdate
+                    if (isBelowMinimum) {
                         val msg = versionInfo.updateMessage
                             ?: "A new version of Sndmart is available. Please update the app to continue."
                         return StartupCheckResult.BlockingUpdate(
-                            updateMessage = msg,
-                            updateUrl = versionInfo.updateUrl
+                            updateMessage = msg
                         )
                     }
                 }

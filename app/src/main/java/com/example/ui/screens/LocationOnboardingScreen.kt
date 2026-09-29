@@ -205,12 +205,15 @@ fun LocationOnboardingScreen(
 
     LaunchedEffect(Unit) {
         isLoadingCities = true
-        val res = repository.getCities()
-        isLoadingCities = false
-        if (res.isSuccess) {
-            allCitiesList = res.getOrNull() ?: emptyList()
-        } else {
-            allCitiesError = res.exceptionOrNull()?.message ?: "Could not load active cities."
+        try {
+            val res = repository.getCities()
+            if (res.isSuccess) {
+                allCitiesList = res.getOrNull() ?: emptyList()
+            } else {
+                allCitiesError = res.exceptionOrNull()?.message ?: "Could not load active cities."
+            }
+        } finally {
+            isLoadingCities = false
         }
     }
 

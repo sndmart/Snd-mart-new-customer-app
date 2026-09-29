@@ -119,7 +119,7 @@ class StartupChecksUnitTest {
     }
 
     @Test
-    fun runStartupChecks_forceUpdateTrue_returnsBlockingUpdate() = runBlocking {
+    fun runStartupChecks_forceUpdateTrue_doesNotBlockWhenNotBelowMinimum() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val sessionManager = UserSessionManager(context)
         SupabaseClient.init("https://example.supabase.co", "test-anon-key")
@@ -138,9 +138,8 @@ class StartupChecksUnitTest {
         val repository = SndmartRepository(api = mockApi, sessionManager = sessionManager)
         val result = repository.runStartupChecks()
 
-        assertTrue(result is StartupCheckResult.BlockingUpdate)
-        val blocking = result as StartupCheckResult.BlockingUpdate
-        assertEquals("Urgent security update required.", blocking.updateMessage)
+        // As per item 6, forceUpdate alone does not block users whose version is >= minimumSupportedVersion
+        assertTrue(result is StartupCheckResult.Passed)
     }
 
     @Test

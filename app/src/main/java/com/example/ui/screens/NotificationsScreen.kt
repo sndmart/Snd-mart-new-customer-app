@@ -90,6 +90,7 @@ fun NotificationsScreen(
 
     LaunchedEffect(userId) {
         loadNotifications(reset = true)
+        userId?.let { repository.refreshUnreadNotificationCount(it) }
     }
 
     Scaffold(
@@ -133,6 +134,7 @@ fun NotificationsScreen(
                                     val res = repository.markAllNotificationsAsRead(currentUserId)
                                     if (res.isSuccess) {
                                         notifications = notifications.map { it.copy(isRead = true) }
+                                        repository.refreshUnreadNotificationCount(currentUserId)
                                     } else {
                                         snackbarHostState.showSnackbar("Could not mark all as read")
                                     }
@@ -206,8 +208,10 @@ fun NotificationsScreen(
                                 onClick = {
                                     // Mark read if unread
                                     if (!item.isRead) {
+                                        val currentUserId = userId
                                         coroutineScope.launch {
                                             repository.markNotificationAsRead(item.id)
+                                            currentUserId?.let { repository.refreshUnreadNotificationCount(it) }
                                         }
                                         notifications = notifications.map {
                                             if (it.id == item.id) it.copy(isRead = true) else it

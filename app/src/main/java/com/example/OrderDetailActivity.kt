@@ -18,12 +18,15 @@ class OrderDetailActivity : Activity() {
             ?: intent.getStringExtra("id")
             ?: intent.data?.lastPathSegment
 
+        val fromNotification = intent.getBooleanExtra("from_notification", false)
         val mainIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (!orderId.isNullOrBlank()) {
                 putExtra("order_id", orderId)
                 putExtra("orderId", orderId)
                 data = Uri.parse("sndmart://order/$orderId")
+            } else if (fromNotification) {
+                putExtra("from_notification", true)
             }
         }
         startActivity(mainIntent)

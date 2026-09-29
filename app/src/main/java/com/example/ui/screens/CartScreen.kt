@@ -34,7 +34,7 @@ fun CartScreen(
     cityId: String?,
     repository: SndmartRepository,
     onBack: () -> Unit,
-    onProceedToCheckout: (isHotel: Boolean, couponCode: String?, slotId: String?) -> Unit
+    onProceedToCheckout: (isHotel: Boolean, couponCode: String?) -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -44,6 +44,15 @@ fun CartScreen(
 
     val rawGroceryCart by repository.groceryCart.collectAsState()
     val rawHotelCart by repository.hotelCart.collectAsState()
+
+    // Free delivery threshold from city_delivery_settings
+    var freeDeliveryThreshold by remember { mutableStateOf<Double?>(null) }
+
+    LaunchedEffect(cityId) {
+        if (!cityId.isNullOrBlank()) {
+            freeDeliveryThreshold = repository.getFreeDeliveryThreshold(cityId)
+        }
+    }
 
     // Fresh resolved items for current render
     var freshItems by remember { mutableStateOf<List<CartItemUi>>(emptyList()) }
@@ -134,7 +143,7 @@ fun CartScreen(
                             }
                             Button(
                                 onClick = {
-                                    onProceedToCheckout(isHotelCartSelected, null, null)
+                                    onProceedToCheckout(isHotelCartSelected, null)
                                 },
                                 modifier = Modifier
                                     .height(48.dp)
@@ -213,11 +222,11 @@ fun CartScreen(
                 }
             }
 
-            if (isLoadingFreshPrices) {
+            if (isLoadingFreshPrices && freshItems.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = NaturalPrimary)
                 }
-            } else if (errorLoadingPrices != null) {
+            } else if (errorLoadingPrices != null && freshItems.isEmpty()) {
                 ErrorCard(message = errorLoadingPrices!!, onRetry = { fetchFreshCart() })
             } else if (freshItems.isEmpty()) {
                 Box(
@@ -262,29 +271,100 @@ fun CartScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    item {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = PastelSage,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                    if (errorLoadingPrices != null) {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(
-                                    Icons.Outlined.CheckCircle,
-                                    contentDescription = null,
-                                    tint = DarkGreenText,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Prices verified live with ${cityId ?: "your city"}'s current stock",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = DarkGreenText,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Could not update prices: $errorLoadingPrices",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = { fetchFreshCart() }) {
+                                        Text("Retry", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = PastelSage,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.CheckCircle,
+                                        contentDescription = null,
+                                        tint = DarkGreenText,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Prices verified live with ${cityId ?: "your city"}'s current stock",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = DarkGreenText,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Free Delivery Hint: "Add Rs X more for FREE Express Delivery"
+                    if (freeDeliveryThreshold != null && freeDeliveryThreshold!! > 0.0) {
+                        val threshold = freeDeliveryThreshold!!
+                        item {
+                            val isFreeUnlocked = subtotal >= threshold
+                            val amountNeeded = (threshold - subtotal).coerceAtLeast(0.0)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isFreeUnlocked) PastelSage else PastelPeach,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("free_delivery_hint_cart")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFreeUnlocked) Icons.Default.CheckCircle else Icons.Default.Bolt,
+                                        contentDescription = null,
+                                        tint = if (isFreeUnlocked) DarkGreenText else Color(0xFFE65100),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = if (isFreeUnlocked) {
+                                            "You've unlocked FREE Express Delivery!"
+                                        } else {
+                                            "Add ₹${"%.0f".format(amountNeeded)} more for FREE Express Delivery"
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isFreeUnlocked) DarkGreenText else Color(0xFFBF360C)
+                                    )
+                                }
                             }
                         }
                     }

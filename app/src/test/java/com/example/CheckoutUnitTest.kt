@@ -189,7 +189,6 @@ class CheckoutUnitTest {
             vendorId = null,
             cityId = "city-uuid-1",
             addressId = "addr-uuid-456",
-            slotId = null,
             paymentMethod = "cod"
         )
 
@@ -266,7 +265,6 @@ class CheckoutUnitTest {
             vendorId = "hotel-biryani-spot-uuid",
             cityId = "city-1",
             addressId = "addr-uuid-789",
-            slotId = null,
             paymentMethod = "upi"
         )
 
@@ -323,7 +321,6 @@ class CheckoutUnitTest {
             vendorId = null,
             cityId = "city-1",
             addressId = "addr-uuid-456",
-            slotId = null,
             paymentMethod = "cod"
         )
 

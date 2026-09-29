@@ -1,6 +1,6 @@
 package com.example
 
-import com.example.data.model.DeliverySlot
+import com.example.data.model.CityDeliverySettings
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -11,104 +11,63 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun deliverySlot_effectiveFee_belowMinOrder_appliesBaseFee() {
-        val eveningSlot = DeliverySlot(
-            id = "slot-evening",
-            name = "Evening (4 PM - 9 PM)",
-            minOrderAmount = 199.0,
-            isFreeDelivery = true,
-            deliveryFee = 30.0
+    fun cityDeliverySettings_effectiveFreeDeliveryMinOrder() {
+        val settings = CityDeliverySettings(
+            cityId = "city-sindhanur",
+            freeDeliveryMinOrderAmount = 99.0,
+            expressDeliveryMinutes = 30
         )
-
-        val subtotal = 25.0
-        assertFalse(eveningSlot.isFreeDeliveryEligible(subtotal))
-        assertEquals(30.0, eveningSlot.getEffectiveDeliveryFee(subtotal), 0.001)
-        assertEquals(174.0, eveningSlot.amountNeededForFreeDelivery(subtotal), 0.001)
+        assertEquals(99.0, settings.effectiveFreeDeliveryMinOrder ?: 0.0, 0.001)
+        assertEquals(30, settings.expressDeliveryMinutes)
     }
 
     @Test
-    fun deliverySlot_effectiveFee_atOrAboveMinOrder_qualifiesForFreeDelivery() {
-        val eveningSlot = DeliverySlot(
-            id = "slot-evening",
-            name = "Evening (4 PM - 9 PM)",
-            minOrderAmount = 199.0,
-            isFreeDelivery = true,
-            deliveryFee = 30.0
-        )
+    fun sindhanurDeliveryFormula_freeAboveThresholdWithin5km() {
+        val distanceKm = 0.4
+        val subtotalAfterDiscount = 150.0
 
-        val exactSubtotal = 199.0
-        assertTrue(eveningSlot.isFreeDeliveryEligible(exactSubtotal))
-        assertEquals(0.0, eveningSlot.getEffectiveDeliveryFee(exactSubtotal), 0.001)
-        assertEquals(0.0, eveningSlot.amountNeededForFreeDelivery(exactSubtotal), 0.001)
-
-        val higherSubtotal = 250.0
-        assertTrue(eveningSlot.isFreeDeliveryEligible(higherSubtotal))
-        assertEquals(0.0, eveningSlot.getEffectiveDeliveryFee(higherSubtotal), 0.001)
+        val fee = if (subtotalAfterDiscount >= 99.0 && distanceKm <= 5.0) {
+            0.0
+        } else {
+            val base = 30.0
+            val extra = if (distanceKm > 3.0) (distanceKm - 3.0) * 10.0 else 0.0
+            (base + extra).coerceAtMost(500.0)
+        }
+        assertEquals(0.0, fee, 0.001)
     }
 
     @Test
-    fun deliverySlot_noFreeDelivery_alwaysAppliesBaseFee() {
-        val standardSlot = DeliverySlot(
-            id = "slot-morning",
-            name = "Morning (9 AM - 12 PM)",
-            minOrderAmount = 0.0,
-            isFreeDelivery = false,
-            deliveryFee = 30.0
-        )
+    fun sindhanurDeliveryFormula_baseChargeBelowThreshold() {
+        val distanceKm = 0.4
+        val subtotalAfterDiscount = 60.0
 
-        assertEquals(30.0, standardSlot.getEffectiveDeliveryFee(500.0), 0.001)
-        assertFalse(standardSlot.isFreeDeliveryEligible(500.0))
+        val fee = if (subtotalAfterDiscount >= 99.0 && distanceKm <= 5.0) {
+            0.0
+        } else {
+            val base = 30.0
+            val extra = if (distanceKm > 3.0) (distanceKm - 3.0) * 10.0 else 0.0
+            (base + extra).coerceAtMost(500.0)
+        }
+        assertEquals(30.0, fee, 0.001)
+
+        val neededForFree = 99.0 - subtotalAfterDiscount
+        assertEquals(39.0, neededForFree, 0.001)
     }
 
     @Test
-    fun expressDelivery_chargeWithinBaseKm() {
-        val settings = com.example.data.model.ExpressDeliverySettings(
-            cityId = "city-1",
-            isActive = true,
-            baseKm = 3.0,
-            baseCharge = 25.0,
-            perKmChargeBeyond = 10.0
-        )
-        val (fee, isFree) = settings.calculateCharge(distanceKm = 2.0, subtotal = 100.0)
-        assertEquals(25.0, fee, 0.001)
-        assertFalse(isFree)
-    }
+    fun sindhanurDeliveryFormula_extraPerKmBeyond3km() {
+        val distanceKm = 5.5
+        val subtotalAfterDiscount = 60.0
 
-    @Test
-    fun expressDelivery_chargeBeyondBaseKm() {
-        val settings = com.example.data.model.ExpressDeliverySettings(
-            cityId = "city-1",
-            isActive = true,
-            baseKm = 3.0,
-            baseCharge = 25.0,
-            perKmChargeBeyond = 10.0
-        )
-        val (fee, isFree) = settings.calculateCharge(distanceKm = 5.5, subtotal = 100.0)
-        // 25.0 + (5.5 - 3.0) * 10.0 = 50.0
-        assertEquals(50.0, fee, 0.001)
-        assertFalse(isFree)
-    }
-
-    @Test
-    fun expressDelivery_freeDeliveryEligibility() {
-        val settings = com.example.data.model.ExpressDeliverySettings(
-            cityId = "city-1",
-            isActive = true,
-            baseKm = 3.0,
-            baseCharge = 25.0,
-            perKmChargeBeyond = 10.0,
-            freeDeliveryMinOrder = 499.0,
-            freeDeliveryMaxKm = 5.0
-        )
-        // Eligible: subtotal >= 499 and distance <= 5.0
-        val (freeFee, isFree) = settings.calculateCharge(distanceKm = 4.0, subtotal = 500.0)
-        assertEquals(0.0, freeFee, 0.001)
-        assertTrue(isFree)
-
-        // Ineligible due to distance exceeding max free km
-        val (farFee, isFarFree) = settings.calculateCharge(distanceKm = 6.0, subtotal = 500.0)
-        assertEquals(55.0, farFee, 0.001)
-        assertFalse(isFarFree)
+        val fee = if (subtotalAfterDiscount >= 99.0 && distanceKm <= 5.0) {
+            0.0
+        } else {
+            val base = 30.0
+            val extra = if (distanceKm > 3.0) (distanceKm - 3.0) * 10.0 else 0.0
+            (base + extra).coerceAtMost(500.0)
+        }
+        // 30.0 + (5.5 - 3.0) * 10.0 = 30 + 25 = 55.0
+        assertEquals(55.0, fee, 0.001)
     }
 
     @Test

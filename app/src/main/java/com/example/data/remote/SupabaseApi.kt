@@ -129,7 +129,7 @@ interface SupabaseApi {
     suspend fun getVendorOperatingHours(
         @Query("vendor_id") vendorId: String,
         @Query("is_active") isActive: String? = "eq.true",
-        @Query("select") select: String = "id,vendor_id,start_time,end_time,day_of_week,is_active"
+        @Query("select") select: String = "id,vendor_id,start_time,end_time,is_active"
     ): Response<List<OperatingSlot>>
 
     // --- PRODUCTS ---
@@ -190,6 +190,11 @@ interface SupabaseApi {
         @Body item: CartItem
     ): Response<List<CartItem>>
 
+    @POST("rest/v1/cart_items")
+    suspend fun insertCartItemsBulk(
+        @Body items: List<CartItem>
+    ): Response<ResponseBody>
+
     @Headers("Prefer: return=representation")
     @PATCH("rest/v1/cart_items")
     suspend fun updateCartItemQuantity(
@@ -244,36 +249,29 @@ interface SupabaseApi {
         @Query("id") idQuery: String
     ): Response<ResponseBody>
 
-    // --- DELIVERY SLOTS & OPTIONS (RPC) ---
-
-    @GET("rest/v1/delivery_slots")
-    suspend fun getDeliverySlots(
-        @Query("city_id") cityId: String? = null,
-        @Query("is_active") isActive: String = "eq.true",
-        @Query("order") order: String = "start_time.asc"
-    ): Response<List<DeliverySlot>>
+    // --- DELIVERY SETTINGS & RPC ---
 
     @GET("rest/v1/city_delivery_settings")
     suspend fun getCityDeliverySettings(
-        @Query("city_id") cityId: String,
-        @Query("is_active") isActive: String = "eq.true"
+        @Query("city_id") cityId: String
     ): Response<List<CityDeliverySettings>>
 
-    @GET("rest/v1/express_delivery_settings")
-    suspend fun getExpressDeliverySettings(
+    @GET("rest/v1/delivery_zones")
+    suspend fun getDeliveryZones(
         @Query("city_id") cityId: String,
-        @Query("is_active") isActive: String = "eq.true"
-    ): Response<List<ExpressDeliverySettings>>
+        @Query("is_active") isActive: String = "eq.true",
+        @Query("order") order: String = "created_at.asc"
+    ): Response<List<DeliveryZone>>
 
-    @POST("rest/v1/rpc/get_customer_delivery_options")
-    suspend fun getCustomerDeliveryOptions(
-        @Body body: Map<String, String>
-    ): Response<CustomerDeliveryOptions>
+    @POST("rest/v1/rpc/calculate_delivery_fee")
+    suspend fun calculateDeliveryFee(
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): Response<Double>
 
-    @POST("rest/v1/rpc/calculate_city_delivery_charge")
-    suspend fun calculateCityDeliveryCharge(
-        @Body body: Map<String, @JvmSuppressWildcards Any?>
-    ): Response<DeliveryChargeResult>
+    @POST("rest/v1/rpc/get_handling_fee")
+    suspend fun getHandlingFee(
+        @Body body: Map<String, @JvmSuppressWildcards Any>
+    ): Response<Double>
 
     @POST("rest/v1/rpc/calculate_city_coupon_discount")
     suspend fun calculateCityCouponDiscount(
@@ -411,6 +409,12 @@ interface SupabaseApi {
         @Query("offset") offset: Int? = null
     ): Response<List<CustomerWalletTransaction>>
 
+    @GET("rest/v1/customer_wallet_transactions")
+    suspend fun getWalletAmountsForBalance(
+        @Query("customer_id") customerId: String,
+        @Query("select") select: String = "type,amount"
+    ): Response<List<WalletAmountRow>>
+
     // --- DEVICE TOKENS ---
 
     @Headers("Prefer: resolution=merge-duplicates")
@@ -447,6 +451,13 @@ interface SupabaseApi {
         @Query("user_type") userType: String = "eq.customer",
         @Body body: Map<String, @JvmSuppressWildcards Any?> = mapOf("is_read" to true)
     ): Response<ResponseBody>
+
+    @Headers("Prefer: count=exact")
+    @HEAD("rest/v1/notifications")
+    suspend fun countUnreadNotifications(
+        @Query("user_id") userId: String,
+        @Query("is_read") isRead: String = "eq.false"
+    ): Response<Void>
 
     // --- APP VERSIONS & MAINTENANCE ---
 

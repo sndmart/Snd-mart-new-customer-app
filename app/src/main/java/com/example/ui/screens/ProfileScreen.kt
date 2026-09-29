@@ -13,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -37,7 +38,7 @@ fun ProfileScreen(
     onNavigateToMyReviews: () -> Unit,
     onNavigateToHelp: () -> Unit,
     onRequireLogin: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSettings: (() -> Unit)? = null,
     onNavigateToNotifications: (() -> Unit)? = null,
     onLogoutSuccess: () -> Unit = {}
 ) {
@@ -52,6 +53,7 @@ fun ProfileScreen(
     val unreadNotifications by sessionManager.unreadNotificationCount.collectAsState()
 
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var isLoggingOut by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -261,24 +263,35 @@ fun ProfileScreen(
                 Button(
                     onClick = {
                         coroutineScope.launch {
-                            try {
+                            isLoggingOut = true
+                            withTimeoutOrNull(5000) {
                                 repository.signOut()
-                            } catch (e: Exception) {
-                                // Ignore or log
                             }
+                            repository.resetInMemoryCart()
+                            sessionManager.logout()
+                            isLoggingOut = false
+                            showLogoutDialog = false
+                            onLogoutSuccess()
                         }
-                        sessionManager.logout()
-                        showLogoutDialog = false
-                        onLogoutSuccess()
                     },
+                    enabled = !isLoggingOut,
                     colors = ButtonDefaults.buttonColors(containerColor = NaturalBadgeRed),
                     shape = RoundedCornerShape(20.dp)
                 ) {
-                    Text("Log Out")
+                    if (isLoggingOut) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Logging out...")
+                    } else {
+                        Text("Log Out")
+                    }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) {
+                TextButton(
+                    onClick = { showLogoutDialog = false },
+                    enabled = !isLoggingOut
+                ) {
                     Text("Cancel")
                 }
             }

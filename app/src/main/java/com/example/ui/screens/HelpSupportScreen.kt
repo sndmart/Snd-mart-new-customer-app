@@ -21,10 +21,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
+import com.example.util.SupportConstants
 
-private const val SUPPORT_PHONE = "+919353461742"
-private const val SUPPORT_WHATSAPP = "919110604033"
-private const val SUPPORT_EMAIL = "sndmartt@gmail.com"
+private const val SUPPORT_PHONE = SupportConstants.PHONE
+private const val SUPPORT_WHATSAPP = SupportConstants.WHATSAPP
+private const val SUPPORT_EMAIL = SupportConstants.EMAIL
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

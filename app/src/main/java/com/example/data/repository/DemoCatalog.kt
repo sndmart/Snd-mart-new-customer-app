@@ -445,8 +445,6 @@ object DemoCatalog {
         )
     )
 
-    val DELIVERY_SLOTS = emptyList<DeliverySlot>()
-
     val COUPONS = listOf(
         Coupon(
             id = "c_sndmart50",

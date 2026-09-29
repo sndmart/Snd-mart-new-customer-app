@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.*
+import com.example.util.SupportConstants
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.BillRow
 import com.example.ui.components.ErrorCard
@@ -94,10 +95,9 @@ fun OrderDetailScreen(
     var partnerRating by remember { mutableStateOf(5) }
     var partnerComment by remember { mutableStateOf("") }
     var reviewSubmitted by remember { mutableStateOf(false) }
+    var isSubmittingReview by remember { mutableStateOf(false) }
     var reviewedOrderIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    // Reorder loading state
-    var isReordering by remember { mutableStateOf(false) }
 
     // Payment retry state
     var isPayingUpi by remember { mutableStateOf(false) }
@@ -274,63 +274,31 @@ fun OrderDetailScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (order != null) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shadowElevation = 8.dp,
-                    color = MaterialTheme.colorScheme.surface
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                // Rate Order Button (delivered + no review submitted yet for this order)
+                val hasReviewed = reviewSubmitted || reviewedOrderIds.contains(orderId)
+                if (order!!.status.lowercase() == "delivered" && !hasReviewed) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shadowElevation = 8.dp,
+                        color = MaterialTheme.colorScheme.surface
                     ) {
-                        // Reorder Button
-                        Button(
-                            onClick = {
-                                val currentCity = cityId ?: order?.cityId ?: ""
-                                coroutineScope.launch {
-                                    isReordering = true
-                                    val res = repository.reorder(orderItems, currentCity)
-                                    isReordering = false
-                                    if (res.isSuccess) {
-                                        snackbarHostState.showSnackbar(res.getOrNull() ?: "Items added to cart")
-                                        onNavigateToCart()
-                                    } else {
-                                        snackbarHostState.showSnackbar("Failed to reorder: ${res.exceptionOrNull()?.message}")
-                                    }
-                                }
-                            },
+                        Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                                .testTag("reorder_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
-                            shape = RoundedCornerShape(24.dp),
-                            enabled = !isReordering
+                                .fillMaxWidth()
+                                .padding(16.dp)
                         ) {
-                            if (isReordering) {
-                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp))
-                            } else {
-                                Icon(Icons.Default.Repeat, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Reorder Items", fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        // Rate Order Button (delivered + no review submitted yet for this order)
-                        val hasReviewed = reviewSubmitted || reviewedOrderIds.contains(orderId)
-                        if (order!!.status.lowercase() == "delivered" && !hasReviewed) {
-                            OutlinedButton(
+                            Button(
                                 onClick = { showReviewDialog = true },
                                 modifier = Modifier
+                                    .fillMaxWidth()
                                     .height(48.dp)
                                     .testTag("rate_order_button"),
+                                colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
                                 shape = RoundedCornerShape(24.dp)
                             ) {
                                 Icon(Icons.Default.Star, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Rate Order")
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Rate Order", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -598,6 +566,7 @@ fun OrderDetailScreen(
                                     "online" -> "Online"
                                     else -> currentOrder.paymentMethod.uppercase()
                                 }
+                                BillRow("Delivery", "Express Delivery")
                                 BillRow("Payment Method", displayPaymentMethod)
                                 BillRow("Payment Status", currentOrder.paymentStatus.capitalize())
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
@@ -693,7 +662,7 @@ fun OrderDetailScreen(
                                 ) {
                                     OutlinedButton(
                                         onClick = {
-                                            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:+910000000000"))
+                                            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${SupportConstants.PHONE}"))
                                             context.startActivity(intent)
                                         },
                                         modifier = Modifier.weight(1f).testTag("help_call_button"),
@@ -707,7 +676,7 @@ fun OrderDetailScreen(
                                         onClick = {
                                             val text = "I need help with order ${currentOrder.orderNumber}"
                                             val encoded = java.net.URLEncoder.encode(text, "UTF-8")
-                                            val url = "https://wa.me/910000000000?text=$encoded"
+                                            val url = "https://wa.me/${SupportConstants.WHATSAPP}?text=$encoded"
                                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                                             context.startActivity(intent)
                                         },
@@ -720,7 +689,7 @@ fun OrderDetailScreen(
                                     }
                                     OutlinedButton(
                                         onClick = {
-                                            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:support@sndmart.in?subject=${Uri.encode("Help with Order ${currentOrder.orderNumber}")}"))
+                                            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${SupportConstants.EMAIL}?subject=${Uri.encode("Help with Order ${currentOrder.orderNumber}")}"))
                                             context.startActivity(intent)
                                         },
                                         modifier = Modifier.weight(1f).testTag("help_email_button"),
@@ -794,8 +763,11 @@ fun OrderDetailScreen(
                     onClick = {
                         val currentCustId = order?.customerId ?: ""
                         coroutineScope.launch {
+                            isSubmittingReview = true
+                            var failed = false
+                            var errorMessage = ""
                             if (!order?.vendorId.isNullOrBlank()) {
-                                repository.submitVendorReview(
+                                val res = repository.submitVendorReview(
                                     VendorReview(
                                         vendorId = order!!.vendorId!!,
                                         customerId = currentCustId,
@@ -804,9 +776,13 @@ fun OrderDetailScreen(
                                         comment = vendorComment.takeIf { it.isNotBlank() }
                                     )
                                 )
+                                if (res.isFailure) {
+                                    failed = true
+                                    errorMessage = res.exceptionOrNull()?.message ?: "Failed to submit vendor review"
+                                }
                             }
-                            if (!order?.deliveryPartnerId.isNullOrBlank()) {
-                                repository.submitDeliveryPartnerReview(
+                            if (!failed && !order?.deliveryPartnerId.isNullOrBlank()) {
+                                val res = repository.submitDeliveryPartnerReview(
                                     DeliveryPartnerReview(
                                         deliveryPartnerId = order!!.deliveryPartnerId!!,
                                         customerId = currentCustId,
@@ -815,16 +791,32 @@ fun OrderDetailScreen(
                                         comment = partnerComment.takeIf { it.isNotBlank() }
                                     )
                                 )
+                                if (res.isFailure) {
+                                    failed = true
+                                    errorMessage = res.exceptionOrNull()?.message ?: "Failed to submit delivery review"
+                                }
                             }
-                            showReviewDialog = false
-                            reviewSubmitted = true
-                            snackbarHostState.showSnackbar("Thank you for your rating!")
+                            isSubmittingReview = false
+                            if (failed) {
+                                snackbarHostState.showSnackbar(if (errorMessage.isNotBlank()) errorMessage else "Could not submit review. Please try again.")
+                            } else {
+                                showReviewDialog = false
+                                reviewSubmitted = true
+                                snackbarHostState.showSnackbar("Thank you for your rating!")
+                            }
                         }
                     },
+                    enabled = !isSubmittingReview,
                     colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
                     shape = RoundedCornerShape(20.dp)
                 ) {
-                    Text("Submit Review")
+                    if (isSubmittingReview) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Submitting...")
+                    } else {
+                        Text("Submit Review")
+                    }
                 }
             },
             dismissButton = {
