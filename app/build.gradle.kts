@@ -55,6 +55,12 @@ android {
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
+      // No google-services.json is committed to this repo (see missingGoogleServicesStrategy
+      // = WARN below), so the Crashlytics plugin can't resolve a Firebase App ID to upload
+      // the mapping file. Disable just that upload step; crash reporting itself is unaffected.
+      firebaseCrashlytics {
+        mappingFileUploadEnabled = false
+      }
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
