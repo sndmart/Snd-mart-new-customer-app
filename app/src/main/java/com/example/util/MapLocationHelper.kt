@@ -47,6 +47,56 @@ object MapLocationHelper {
         return com.example.util.isValidIndianCoordinate(lat, lng)
     }
 
+    @Volatile private var lastNominatimRequestAtMs: Long = 0L
+
+    /**
+     * Address search against Nominatim's `/search` endpoint — the OSM fallback used only when
+     * Google Places/Geocoder are unconfigured or returned nothing. Per the Nominatim usage
+     * policy this is never wired to autocomplete-as-you-type: callers (searchPlaces) already
+     * gate on a minimum query length, and this additionally self-throttles to ~1 req/sec.
+     */
+    private suspend fun searchViaNominatim(context: Context, query: String): List<PlaceSearchResult> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!shouldAllowNominatimRequest(lastNominatimRequestAtMs, now)) return@withContext emptyList()
+        lastNominatimRequestAtMs = now
+        try {
+            val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+            val url = "${OsmGeocodingConfig.nominatimBaseUrl}/search?format=jsonv2&q=$encoded&countrycodes=in&addressdetails=1&limit=5"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", OsmGeocodingConfig.nominatimUserAgent(context.packageName))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext emptyList()
+                parseNominatimSearchResponse(response.body?.string())
+            }
+        } catch (e: Exception) {
+            Log.w("MapLocationHelper", "Nominatim search fallback failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Reverse geocoding against Nominatim's `/reverse` endpoint — OSM fallback for reverseGeocode(). */
+    private suspend fun reverseGeocodeViaNominatim(context: Context, lat: Double, lng: Double): GeocodeAddressResult? = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!shouldAllowNominatimRequest(lastNominatimRequestAtMs, now)) return@withContext null
+        lastNominatimRequestAtMs = now
+        try {
+            val url = "${OsmGeocodingConfig.nominatimBaseUrl}/reverse?format=jsonv2&lat=$lat&lon=$lng&countrycodes=in&addressdetails=1"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", OsmGeocodingConfig.nominatimUserAgent(context.packageName))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                parseNominatimReverseResponse(response.body?.string())
+            }
+        } catch (e: Exception) {
+            Log.w("MapLocationHelper", "Nominatim reverse geocoding fallback failed: ${e.message}")
+            null
+        }
+    }
+
     /**
      * Searches for place predictions via Places SDK if initialized and configured.
      * Falls back to Android's built-in Geocoder if Places is unconfigured or returns no results.
@@ -93,11 +143,11 @@ object MapLocationHelper {
         }
 
         // 2. Fallback: Built-in Android Geocoder
-        try {
+        val geocoderResults = try {
             val geocoder = Geocoder(context, Locale("en", "IN"))
             @Suppress("DEPRECATION")
             val results = geocoder.getFromLocationName(query, 5) ?: emptyList()
-            return@withContext results.mapIndexed { index, addr ->
+            results.mapIndexed { index, addr ->
                 val primary = addr.featureName ?: addr.subLocality ?: addr.locality ?: query
                 val full = (0..addr.maxAddressLineIndex).joinToString(", ") { addr.getAddressLine(it) }
                     .ifBlank { listOfNotNull(addr.subLocality, addr.locality, addr.adminArea).joinToString(", ") }
@@ -113,6 +163,15 @@ object MapLocationHelper {
             Log.w("MapLocationHelper", "Geocoder search fallback failed: ${e.message}")
             emptyList()
         }
+        if (geocoderResults.isNotEmpty()) return@withContext geocoderResults
+
+        // 3. OSM fallback: Nominatim search — only for a real, deliberate search (never
+        // autocomplete-as-you-type; the minimum length here plus the request-level throttle
+        // in searchViaNominatim together honour Nominatim's usage policy).
+        if (query.trim().length >= 3) {
+            return@withContext searchViaNominatim(context, query.trim())
+        }
+        emptyList()
     }
 
     /**
@@ -246,8 +305,11 @@ object MapLocationHelper {
             null
         }
 
-        // Fall back to the REST API if the device geocoder didn't return anything
-        deviceResult ?: reverseGeocodeViaRestApi(lat, lng)
+        // Fall back to Google's REST API (if a key is configured), then finally to the OSM
+        // Nominatim fallback if Google is unconfigured or that also came back empty.
+        deviceResult
+            ?: reverseGeocodeViaRestApi(lat, lng)
+            ?: reverseGeocodeViaNominatim(context, lat, lng)
     }
 
     private fun formatAddress(addr: Address): GeocodeAddressResult {

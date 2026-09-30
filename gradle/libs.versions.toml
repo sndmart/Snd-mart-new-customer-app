@@ -46,6 +46,8 @@ playServicesMaps = "19.0.0"
 mapsCompose = "6.4.1"
 places = "3.5.0"
 razorpayCheckout = "1.6.41"
+osmdroid = "6.1.20"
+playServicesBase = "18.5.0"
 
 
 [libraries]
@@ -109,6 +111,8 @@ play-services-maps = { group = "com.google.android.gms", name = "play-services-m
 maps-compose = { group = "com.google.maps.android", name = "maps-compose", version.ref = "mapsCompose" }
 places = { group = "com.google.android.libraries.places", name = "places", version.ref = "places" }
 firebase-crashlytics = { group = "com.google.firebase", name = "firebase-crashlytics" }
+osmdroid-android = { group = "org.osmdroid", name = "osmdroid-android", version.ref = "osmdroid" }
+play-services-base = { group = "com.google.android.gms", name = "play-services-base", version.ref = "playServicesBase" }
 
 
 [plugins]

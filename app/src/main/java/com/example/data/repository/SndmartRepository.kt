@@ -2993,6 +2993,78 @@ class SndmartRepository(
         }
     }
 
+    // --- MAP PROVIDER (dual Google/OSM) SETTINGS ---
+
+    fun parseMapProviderSetting(jsonString: String?): com.example.data.maps.RemoteMapProviderFlag {
+        if (jsonString.isNullOrBlank()) return com.example.data.maps.RemoteMapProviderFlag.AUTO
+        return try {
+            val jsonArray = JSONArray(jsonString.trim())
+            if (jsonArray.length() == 0) return com.example.data.maps.RemoteMapProviderFlag.AUTO
+            val firstObj = jsonArray.getJSONObject(0)
+            if (!firstObj.has("value")) return com.example.data.maps.RemoteMapProviderFlag.AUTO
+            val raw: String? = when (val v = firstObj.opt("value")) {
+                is String -> v
+                is JSONObject -> v.optString("provider").takeIf { it.isNotBlank() }
+                    ?: v.optString("value").takeIf { it.isNotBlank() }
+                null, JSONObject.NULL -> null
+                else -> v.toString()
+            }
+            when (raw?.trim()?.lowercase()) {
+                "google" -> com.example.data.maps.RemoteMapProviderFlag.GOOGLE
+                "osm", "openstreetmap" -> com.example.data.maps.RemoteMapProviderFlag.OSM
+                else -> com.example.data.maps.RemoteMapProviderFlag.AUTO
+            }
+        } catch (e: Exception) {
+            com.example.data.maps.RemoteMapProviderFlag.AUTO
+        }
+    }
+
+    suspend fun getMapProviderRemoteFlag(): com.example.data.maps.RemoteMapProviderFlag {
+        if (!SupabaseClient.isKeyConfigured()) return com.example.data.maps.RemoteMapProviderFlag.AUTO
+        return try {
+            val response = api.getAppSetting(key = "eq.map_provider", limit = 1)
+            if (response.isSuccessful && response.body() != null) {
+                parseMapProviderSetting(response.body()!!.string())
+            } else {
+                com.example.data.maps.RemoteMapProviderFlag.AUTO
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getMapProviderRemoteFlag error: ${e.message}")
+            com.example.data.maps.RemoteMapProviderFlag.AUTO
+        }
+    }
+
+    /** Generic single-string app_setting reader, e.g. for `osm_tile_url` / `osm_satellite_tile_url`. */
+    fun parseAppSettingStringValue(jsonString: String?): String? {
+        if (jsonString.isNullOrBlank()) return null
+        return try {
+            val jsonArray = JSONArray(jsonString.trim())
+            if (jsonArray.length() == 0) return null
+            val firstObj = jsonArray.getJSONObject(0)
+            if (!firstObj.has("value")) return null
+            when (val v = firstObj.opt("value")) {
+                is String -> v.takeIf { it.isNotBlank() }
+                is JSONObject -> v.optString("url").takeIf { it.isNotBlank() }
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    suspend fun getAppSettingStringValue(key: String): String? {
+        if (!SupabaseClient.isKeyConfigured()) return null
+        return try {
+            val response = api.getAppSetting(key = "eq.$key", limit = 1)
+            if (response.isSuccessful && response.body() != null) {
+                parseAppSettingStringValue(response.body()!!.string())
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "getAppSettingStringValue($key) error: ${e.message}")
+            null
+        }
+    }
+
     suspend fun runStartupChecks(): StartupCheckResult {
         if (!SupabaseClient.isKeyConfigured()) {
             return StartupCheckResult.Passed

@@ -50,19 +50,24 @@ import com.example.data.location.HighAccuracyLocationManager
 import com.example.data.location.LocationDetector
 import com.example.data.model.City
 import com.example.data.model.CustomerAddress
+import com.example.data.maps.MapProvider
+import com.example.data.maps.rememberMapProviderState
+import com.example.data.maps.rememberOsmTileConfig
 import com.example.data.repository.SndmartRepository
 import com.example.data.session.UserSessionManager
 import com.example.ui.components.ErrorCard
+import com.example.ui.components.map.GeoLatLng
+import com.example.ui.components.map.MapProviderSwitchButton
+import com.example.ui.components.map.MapTypeToggleButton
+import com.example.ui.components.map.SndmartMap
+import com.example.ui.components.map.SndmartMapType
+import com.example.ui.components.map.SndmartMarker
+import com.example.ui.components.map.rememberSndmartMapState
 import com.example.ui.theme.*
 import com.example.util.MapLocationHelper
 import com.example.util.PhoneUtils
 import com.example.util.PlaceSearchResult
 import com.example.util.isValidIndianCoordinate
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.maps.android.compose.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -168,18 +173,19 @@ fun LocationOnboardingScreen(
     // Interactive Map Pin state
     val defaultMapCenter = remember(detectedCity) {
         if (currentLat != null && currentLng != null) {
-            LatLng(currentLat!!, currentLng!!)
+            GeoLatLng(currentLat!!, currentLng!!)
         } else if (detectedCity?.centerLat != null && detectedCity?.centerLng != null) {
-            LatLng(detectedCity!!.centerLat!!, detectedCity!!.centerLng!!)
+            GeoLatLng(detectedCity!!.centerLat!!, detectedCity!!.centerLng!!)
         } else {
-            LatLng(15.7667, 76.7583) // Sindhanur default
+            GeoLatLng(15.7667, 76.7583) // Sindhanur default
         }
     }
-    var pinLatLng by remember { mutableStateOf<LatLng?>(null) }
-    val markerState = rememberMarkerState(position = defaultMapCenter)
-    val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(defaultMapCenter, 16.5f)
-    }
+    var pinLatLng by remember { mutableStateOf<GeoLatLng?>(null) }
+    var currentPinPosition by remember { mutableStateOf(defaultMapCenter) }
+    val mapState = rememberSndmartMapState(initialCenter = defaultMapCenter, initialZoom = 16.5f)
+    val mapProviderState = rememberMapProviderState(repository)
+    val osmTileConfig = rememberOsmTileConfig(repository)
+    var onboardingMapType by remember { mutableStateOf(SndmartMapType.NORMAL) }
 
     var hasUserManuallyEditedAddress by remember { mutableStateOf(false) }
     var lastReverseGeocodedAddress by remember { mutableStateOf<String?>(null) }
@@ -249,12 +255,13 @@ fun LocationOnboardingScreen(
     }
 
     // Reverse geocode helper when pin moves
-    fun triggerPinReverseGeocode(latLng: LatLng) {
+    fun triggerPinReverseGeocode(latLng: GeoLatLng) {
         pinLatLng = latLng
+        currentPinPosition = latLng
         coroutineScope.launch {
             isReverseGeocoding = true
             try {
-                val geocoded = MapLocationHelper.reverseGeocode(context, latLng.latitude, latLng.longitude)
+                val geocoded = MapLocationHelper.reverseGeocode(context, latLng.lat, latLng.lng)
                 if (geocoded != null) {
                     lastReverseGeocodedAddress = geocoded.addressLine
                     if (!hasUserManuallyEditedAddress || addressLine.isBlank()) {
@@ -269,13 +276,6 @@ fun LocationOnboardingScreen(
             } finally {
                 isReverseGeocoding = false
             }
-        }
-    }
-
-    // Listen to marker drag events to update the pin position
-    LaunchedEffect(markerState.isDragging) {
-        if (!markerState.isDragging) {
-            triggerPinReverseGeocode(markerState.position)
         }
     }
 
@@ -296,15 +296,15 @@ fun LocationOnboardingScreen(
                 val defaultLng = detectedCity?.centerLng ?: 76.7583
                 val initialLat = lat ?: defaultLat
                 val initialLng = lng ?: defaultLng
-                val initialPos = LatLng(initialLat, initialLng)
+                val initialPos = GeoLatLng(initialLat, initialLng)
 
                 currentLat = lat
                 currentLng = lng
                 pinLatLng = initialPos
-                markerState.position = initialPos
+                currentPinPosition = initialPos
 
                 coroutineScope.launch {
-                    cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(initialPos, 16.8f))
+                    mapState.animateTo(initialPos.lat, initialPos.lng, 16.8f)
                 }
 
                 if (lat != null && lng != null) {
@@ -350,9 +350,9 @@ fun LocationOnboardingScreen(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "GPS detection exception", e)
-                val fallbackPos = LatLng(detectedCity?.centerLat ?: 15.7667, detectedCity?.centerLng ?: 76.7583)
+                val fallbackPos = GeoLatLng(detectedCity?.centerLat ?: 15.7667, detectedCity?.centerLng ?: 76.7583)
                 pinLatLng = fallbackPos
-                markerState.position = fallbackPos
+                currentPinPosition = fallbackPos
                 triggerPinReverseGeocode(fallbackPos)
             } finally {
                 isDetectingGps = false
@@ -370,8 +370,8 @@ fun LocationOnboardingScreen(
     // Step 4: Save address handler - ONLY called on manual "Confirm Location" tap with validation
     fun handleSaveAddress() {
         // Final pin position after customer dragging or searching
-        val finalLat = pinLatLng?.latitude ?: markerState.position.latitude
-        val finalLng = pinLatLng?.longitude ?: markerState.position.longitude
+        val finalLat = pinLatLng?.lat ?: currentPinPosition.lat
+        val finalLng = pinLatLng?.lng ?: currentPinPosition.lng
 
         // Mandatory coordinate validation check (Step 4)
         if (!isValidIndianCoordinate(finalLat, finalLng)) {
@@ -771,14 +771,14 @@ fun LocationOnboardingScreen(
                                                         }
                                                     }
                                                     val newCenter = if (city.centerLat != null && city.centerLng != null) {
-                                                        LatLng(city.centerLat!!, city.centerLng!!)
+                                                        GeoLatLng(city.centerLat!!, city.centerLng!!)
                                                     } else {
-                                                        LatLng(15.7667, 76.7583)
+                                                        GeoLatLng(15.7667, 76.7583)
                                                     }
                                                     pinLatLng = newCenter
-                                                    markerState.position = newCenter
+                                                    currentPinPosition = newCenter
                                                     coroutineScope.launch {
-                                                        cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(newCenter, 16.5f))
+                                                        mapState.animateTo(newCenter.lat, newCenter.lng, 16.5f)
                                                     }
                                                     triggerPinReverseGeocode(newCenter)
                                                 }
@@ -938,12 +938,11 @@ fun LocationOnboardingScreen(
                                                             val target = MapLocationHelper.fetchPlaceLatLng(context, item)
                                                             isSearchingPlaces = false
                                                             if (target != null) {
-                                                                pinLatLng = target
-                                                                markerState.position = target
-                                                                cameraPositionState.animate(
-                                                                    CameraUpdateFactory.newLatLngZoom(target, 17f)
-                                                                )
-                                                                triggerPinReverseGeocode(target)
+                                                                val geoTarget = GeoLatLng(target.latitude, target.longitude)
+                                                                pinLatLng = geoTarget
+                                                                currentPinPosition = geoTarget
+                                                                mapState.animateTo(geoTarget.lat, geoTarget.lng, 17f)
+                                                                triggerPinReverseGeocode(geoTarget)
                                                             }
                                                         }
                                                     }
@@ -997,37 +996,44 @@ fun LocationOnboardingScreen(
                                     .clip(RoundedCornerShape(14.dp))
                                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
                             ) {
-                                GoogleMap(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .testTag("delivery_pin_map"),
-                                    cameraPositionState = cameraPositionState,
+                                SndmartMap(
+                                    modifier = Modifier.fillMaxSize(),
+                                    testTag = "delivery_pin_map",
+                                    state = mapState,
+                                    mapProviderState = mapProviderState,
+                                    markers = listOf(
+                                        SndmartMarker(
+                                            id = "delivery_pin",
+                                            position = currentPinPosition,
+                                            title = "Delivery Location",
+                                            snippet = "Drag to adjust pin to your exact doorstep",
+                                            draggable = true,
+                                            onDragEnd = { latLng -> triggerPinReverseGeocode(latLng) }
+                                        )
+                                    ),
+                                    myLocationEnabled = hasLocationPermission,
+                                    mapType = onboardingMapType,
+                                    osmTileUrlBase = osmTileConfig.tileUrlBase,
+                                    osmSatelliteTileUrlBase = osmTileConfig.satelliteTileUrlBase,
                                     onMapClick = { clickedLatLng ->
                                         pinLatLng = clickedLatLng
-                                        markerState.position = clickedLatLng
+                                        currentPinPosition = clickedLatLng
                                         triggerPinReverseGeocode(clickedLatLng)
-                                    },
-                                    uiSettings = remember {
-                                        MapUiSettings(
-                                            zoomControlsEnabled = false,
-                                            myLocationButtonEnabled = false,
-                                            compassEnabled = true,
-                                            scrollGesturesEnabled = true,
-                                            zoomGesturesEnabled = true,
-                                            rotationGesturesEnabled = false,
-                                            tiltGesturesEnabled = false
-                                        )
-                                    },
-                                    properties = remember(hasLocationPermission) {
-                                        MapProperties(isMyLocationEnabled = hasLocationPermission)
                                     }
+                                )
+
+                                // Map provider switch + satellite toggle
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Marker(
-                                        state = markerState,
-                                        title = "Delivery Location",
-                                        snippet = "Drag to adjust pin to your exact doorstep",
-                                        draggable = true,
-                                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                                    MapProviderSwitchButton(mapProviderState = mapProviderState)
+                                    MapTypeToggleButton(
+                                        mapType = onboardingMapType,
+                                        onToggle = { onboardingMapType = it },
+                                        satelliteAvailable = mapProviderState.provider != MapProvider.OSM || !osmTileConfig.satelliteTileUrlBase.isNullOrBlank()
                                     )
                                 }
 
@@ -1065,11 +1071,11 @@ fun LocationOnboardingScreen(
                                 if (currentLat != null && currentLng != null) {
                                     FloatingActionButton(
                                         onClick = {
-                                            val gpsPos = LatLng(currentLat!!, currentLng!!)
+                                            val gpsPos = GeoLatLng(currentLat!!, currentLng!!)
                                             pinLatLng = gpsPos
-                                            markerState.position = gpsPos
+                                            currentPinPosition = gpsPos
                                             coroutineScope.launch {
-                                                cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(gpsPos, 17f))
+                                                mapState.animateTo(gpsPos.lat, gpsPos.lng, 17f)
                                             }
                                             triggerPinReverseGeocode(gpsPos)
                                         },
@@ -1324,13 +1330,13 @@ fun LocationOnboardingScreen(
                     }
                 }
                 if (city.centerLat != null && city.centerLng != null) {
-                    val cityPos = LatLng(city.centerLat, city.centerLng)
+                    val cityPos = GeoLatLng(city.centerLat, city.centerLng)
                     currentLat = city.centerLat
                     currentLng = city.centerLng
                     pinLatLng = cityPos
-                    markerState.position = cityPos
+                    currentPinPosition = cityPos
                     coroutineScope.launch {
-                        cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(cityPos, 15.5f))
+                        mapState.animateTo(cityPos.lat, cityPos.lng, 15.5f)
                     }
                     triggerPinReverseGeocode(cityPos)
                 } else if (addressLine.isBlank()) {

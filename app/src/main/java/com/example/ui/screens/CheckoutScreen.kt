@@ -1223,11 +1223,15 @@ fun CheckoutScreen(
     if (showAddAddressDialog) {
         val userName = sessionManager.userName.collectAsState().value ?: ""
         val userPhone = sessionManager.userPhone.collectAsState().value ?: ""
+        val selectedCity = sessionManager.selectedCity.collectAsState().value
         AddressPickerDialog(
             repository = repository,
             userId = userId ?: "user",
             defaultRecipientName = newRecipientName.ifBlank { userName },
             defaultPhone = newPhone.ifBlank { userPhone },
+            cityCenter = selectedCity?.centerLat?.let { lat ->
+                selectedCity.centerLng?.let { lng -> com.example.ui.components.map.GeoLatLng(lat, lng) }
+            },
             onDismiss = { showAddAddressDialog = false },
             onSaved = { saved ->
                 showAddAddressDialog = false
