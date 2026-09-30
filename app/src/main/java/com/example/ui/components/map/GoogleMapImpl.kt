@@ -10,11 +10,10 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MapType
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
-import com.google.maps.android.compose.GoogleMapScope
 import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapType
 import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.Polyline
@@ -29,7 +28,7 @@ private fun tintHue(tint: MarkerTint): Float = when (tint) {
 }
 
 @Composable
-private fun GoogleMapScope.GoogleMarkerItem(m: SndmartMarker) {
+private fun GoogleMarkerItem(m: SndmartMarker) {
     val markerState = rememberMarkerState(key = m.id, position = LatLng(m.position.lat, m.position.lng))
     if (!markerState.isDragging) {
         markerState.position = LatLng(m.position.lat, m.position.lng)
