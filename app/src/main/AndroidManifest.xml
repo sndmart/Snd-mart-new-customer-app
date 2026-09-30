@@ -8,6 +8,17 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- osmdroid (OpenStreetMap fallback) pulls in a legacy storage permission for its
+         default SD-card tile cache path in its own manifest. We point osmdroid at
+         cacheDir/filesDir instead (see OsmMapImpl.kt), so no storage permission is needed
+         or requested; strip anything the library manifest tries to merge in. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        tools:node="remove" />
+
     <application
         android:name=".SndmartApp"
         android:allowBackup="false"

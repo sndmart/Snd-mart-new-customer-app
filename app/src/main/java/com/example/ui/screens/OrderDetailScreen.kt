@@ -40,17 +40,24 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.data.maps.MapProvider
+import com.example.data.maps.rememberMapProviderState
+import com.example.data.maps.rememberOsmTileConfig
 import com.example.data.model.*
 import com.example.util.SupportConstants
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.BillRow
 import com.example.ui.components.ErrorCard
+import com.example.ui.components.map.GeoLatLng
+import com.example.ui.components.map.MapProviderSwitchButton
+import com.example.ui.components.map.MapTypeToggleButton
+import com.example.ui.components.map.MarkerTint
+import com.example.ui.components.map.SndmartMap
+import com.example.ui.components.map.SndmartMapType
+import com.example.ui.components.map.SndmartMarker
+import com.example.ui.components.map.SndmartPolylineSpec
+import com.example.ui.components.map.rememberSndmartMapState
 import com.example.ui.theme.*
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.LatLngBounds
-import com.google.maps.android.compose.*
 import com.example.util.RazorpayPaymentManager
 import com.example.util.RazorpayPaymentResult
 import kotlinx.coroutines.delay
@@ -781,6 +788,7 @@ fun OrderDetailScreen(
 
                                             // C. Live Map
                                             LiveDeliveryMap(
+                                                repository = repository,
                                                 deliveryPartner = deliveryPartner!!,
                                                 deliveryAddress = deliveryAddress
                                             )
@@ -1557,6 +1565,7 @@ fun DeliveryPartnerCardContent(
 
 @Composable
 fun LiveDeliveryMap(
+    repository: SndmartRepository,
     deliveryPartner: DeliveryPartner,
     deliveryAddress: CustomerAddress?
 ) {
@@ -1610,32 +1619,24 @@ fun LiveDeliveryMap(
             }
         }
     } else {
-        val partnerLatLng = remember(lat, lng) { LatLng(lat, lng) }
+        val partnerLatLng = remember(lat, lng) { GeoLatLng(lat, lng) }
         val destLatLng = remember(deliveryAddress?.lat, deliveryAddress?.lng) {
             if (deliveryAddress?.lat != null && deliveryAddress.lng != null && deliveryAddress.lat != 0.0) {
-                LatLng(deliveryAddress.lat, deliveryAddress.lng)
+                GeoLatLng(deliveryAddress.lat, deliveryAddress.lng)
             } else null
         }
 
-        val cameraPositionState = rememberCameraPositionState {
-            position = CameraPosition.fromLatLngZoom(partnerLatLng, 15f)
-        }
+        val mapState = rememberSndmartMapState(initialCenter = partnerLatLng, initialZoom = 15f)
+        val mapProviderState = rememberMapProviderState(repository)
+        val osmTileConfig = rememberOsmTileConfig(repository)
+        var trackingMapType by remember { mutableStateOf(SndmartMapType.NORMAL) }
 
         // Auto-fit camera when partner or destination location updates
         LaunchedEffect(partnerLatLng, destLatLng) {
-            try {
-                if (destLatLng != null) {
-                    val bounds = LatLngBounds.builder()
-                        .include(partnerLatLng)
-                        .include(destLatLng)
-                        .build()
-                    cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(bounds, 120))
-                } else {
-                    cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(partnerLatLng, 15f))
-                }
-            } catch (e: Exception) {
-                // If map not yet laid out, fallback to centering on partner
-                cameraPositionState.position = CameraPosition.fromLatLngZoom(partnerLatLng, 15f)
+            if (destLatLng != null) {
+                mapState.animateToBounds(listOf(partnerLatLng, destLatLng), paddingPx = 120)
+            } else {
+                mapState.animateTo(partnerLatLng.lat, partnerLatLng.lng, 15f)
             }
         }
 
@@ -1696,43 +1697,55 @@ fun LiveDeliveryMap(
                         .clip(RoundedCornerShape(14.dp))
                         .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
                 ) {
-                    GoogleMap(
+                    SndmartMap(
+                        modifier = Modifier.fillMaxSize(),
+                        testTag = "google_tracking_map",
+                        state = mapState,
+                        mapProviderState = mapProviderState,
+                        markers = buildList {
+                            add(
+                                SndmartMarker(
+                                    id = "delivery_partner",
+                                    position = partnerLatLng,
+                                    title = "Delivery Partner: ${deliveryPartner.name}",
+                                    snippet = "On the way to deliver your order",
+                                    tint = MarkerTint.BLUE
+                                )
+                            )
+                            if (destLatLng != null) {
+                                add(
+                                    SndmartMarker(
+                                        id = "delivery_destination",
+                                        position = destLatLng,
+                                        title = "Delivery Address (${deliveryAddress?.label ?: "Home"})",
+                                        snippet = deliveryAddress?.addressLine ?: "",
+                                        tint = MarkerTint.RED
+                                    )
+                                )
+                            }
+                        },
+                        // Route Polyline connecting Rider to Destination
+                        polyline = destLatLng?.let {
+                            SndmartPolylineSpec(points = listOf(partnerLatLng, it), color = NaturalPrimary, widthPx = 8f)
+                        },
+                        mapType = trackingMapType,
+                        osmTileUrlBase = osmTileConfig.tileUrlBase,
+                        osmSatelliteTileUrlBase = osmTileConfig.satelliteTileUrlBase
+                    )
+
+                    // Map provider switch + satellite toggle
+                    Column(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("google_tracking_map"),
-                        cameraPositionState = cameraPositionState,
-                        uiSettings = remember {
-                            MapUiSettings(
-                                zoomControlsEnabled = false,
-                                myLocationButtonEnabled = false,
-                                compassEnabled = true
-                            )
-                        }
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        // Marker 1: Delivery Partner
-                        Marker(
-                            state = rememberMarkerState(position = partnerLatLng).apply {
-                                position = partnerLatLng
-                            },
-                            title = "Delivery Partner: ${deliveryPartner.name}",
-                            snippet = "On the way to deliver your order"
+                        MapProviderSwitchButton(mapProviderState = mapProviderState)
+                        MapTypeToggleButton(
+                            mapType = trackingMapType,
+                            onToggle = { trackingMapType = it },
+                            satelliteAvailable = mapProviderState.provider != MapProvider.OSM || !osmTileConfig.satelliteTileUrlBase.isNullOrBlank()
                         )
-
-                        // Marker 2: Delivery Address Destination (if coords available)
-                        if (destLatLng != null) {
-                            Marker(
-                                state = rememberMarkerState(position = destLatLng),
-                                title = "Delivery Address (${deliveryAddress?.label ?: "Home"})",
-                                snippet = deliveryAddress?.addressLine ?: ""
-                            )
-
-                            // Route Polyline connecting Rider to Destination
-                            Polyline(
-                                points = listOf(partnerLatLng, destLatLng),
-                                color = NaturalPrimary,
-                                width = 8f
-                            )
-                        }
                     }
 
                     // Floating Recenter Button
@@ -1740,13 +1753,9 @@ fun LiveDeliveryMap(
                         onClick = {
                             coroutineScope.launch {
                                 if (destLatLng != null) {
-                                    val bounds = LatLngBounds.builder()
-                                        .include(partnerLatLng)
-                                        .include(destLatLng)
-                                        .build()
-                                    cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(bounds, 120))
+                                    mapState.animateToBounds(listOf(partnerLatLng, destLatLng), paddingPx = 120)
                                 } else {
-                                    cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(partnerLatLng, 16f))
+                                    mapState.animateTo(partnerLatLng.lat, partnerLatLng.lng, 16f)
                                 }
                             }
                         },

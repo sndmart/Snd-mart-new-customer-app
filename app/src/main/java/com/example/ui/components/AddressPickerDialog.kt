@@ -37,24 +37,29 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.data.location.GpsState
 import com.example.data.location.HighAccuracyLocationManager
+import com.example.data.maps.rememberMapProviderState
+import com.example.data.maps.rememberOsmTileConfig
 import com.example.data.model.CustomerAddress
 import com.example.data.repository.SndmartRepository
+import com.example.ui.components.map.GeoLatLng
+import com.example.ui.components.map.MarkerTint
+import com.example.ui.components.map.MapProviderSwitchButton
+import com.example.ui.components.map.MapTypeToggleButton
+import com.example.ui.components.map.SndmartCircleSpec
+import com.example.ui.components.map.SndmartMap
+import com.example.ui.components.map.SndmartMapType
+import com.example.ui.components.map.SndmartMarker
+import com.example.ui.components.map.rememberSndmartMapState
 import com.example.ui.theme.*
 import com.example.util.GeocodeAddressResult
 import com.example.util.MapLocationHelper
 import com.example.util.PhoneUtils
 import com.example.util.PlaceSearchResult
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.maps.android.compose.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val INDIA_CENTER = LatLng(20.5937, 78.9629)
-private val BENGALURU_CENTER = LatLng(12.9716, 77.5946)
+private val INDIA_CENTER = GeoLatLng(20.5937, 78.9629)
 
 enum class AddressPickerUiState {
     LOCATION_PREVIEW,    // Swiggy style preview with "Use This Location" & "Adjust on Map"
@@ -80,25 +85,32 @@ fun AddressPickerDialog(
     defaultRecipientName: String = "",
     defaultPhone: String = "",
     autoDetectOnOpen: Boolean = true,
+    cityCenter: GeoLatLng? = null,
     onDismiss: () -> Unit,
     onSaved: (CustomerAddress) -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // Initial Coordinates: existing lat/lng -> fallback
+    // Initial Coordinates: existing lat/lng -> the user's selected city's centre -> India centre
     val initialLatLng = remember {
         if (existing?.lat != null && existing.lng != null && existing.lat != 0.0) {
-            LatLng(existing.lat, existing.lng)
+            GeoLatLng(existing.lat, existing.lng)
         } else {
-            BENGALURU_CENTER
+            cityCenter ?: INDIA_CENTER
         }
     }
 
     var selectedLatLng by remember { mutableStateOf(initialLatLng) }
-    var exactGpsLatLng by remember { mutableStateOf<LatLng?>(null) }
+    var exactGpsLatLng by remember { mutableStateOf<GeoLatLng?>(null) }
     var exactGpsAccuracy by remember { mutableStateOf<Float?>(null) }
     var gpsState by remember { mutableStateOf<GpsState>(GpsState.Idle) }
+    var mapType by remember { mutableStateOf(SndmartMapType.NORMAL) }
+    var hasFineLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     var uiMode by remember {
         mutableStateOf(
@@ -129,16 +141,19 @@ fun AddressPickerDialog(
     var isSearchingPlaces by remember { mutableStateOf(false) }
     var searchJob by remember { mutableStateOf<Job?>(null) }
 
-    val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(initialLatLng, if (existing?.lat != null) 17.5f else 12f)
-    }
+    val mapState = rememberSndmartMapState(
+        initialCenter = initialLatLng,
+        initialZoom = if (existing?.lat != null) 17.5f else 12f
+    )
+    val mapProviderState = rememberMapProviderState(repository)
+    val osmTileConfig = rememberOsmTileConfig(repository)
 
     // Reverse geocode whenever pin moves or camera settles
-    fun triggerReverseGeocode(latLng: LatLng, overwriteAddress: Boolean = true) {
+    fun triggerReverseGeocode(latLng: GeoLatLng, overwriteAddress: Boolean = true) {
         selectedLatLng = latLng
         coroutineScope.launch {
             isReverseGeocoding = true
-            val geo = MapLocationHelper.reverseGeocode(context, latLng.latitude, latLng.longitude)
+            val geo = MapLocationHelper.reverseGeocode(context, latLng.lat, latLng.lng)
             isReverseGeocoding = false
             if (geo != null) {
                 geocodedResult = geo
@@ -173,16 +188,13 @@ fun AddressPickerDialog(
             }
 
             if (location != null) {
-                val userLatLng = LatLng(location.latitude, location.longitude)
+                val userLatLng = GeoLatLng(location.latitude, location.longitude)
                 exactGpsLatLng = userLatLng
                 exactGpsAccuracy = if (location.hasAccuracy()) location.accuracy else 15f
                 selectedLatLng = userLatLng
 
                 // Swiggy behavior: Center automatically with maximum zoom-in for doorstep precision
-                cameraPositionState.animate(
-                    CameraUpdateFactory.newLatLngZoom(userLatLng, 18.5f),
-                    durationMs = 900
-                )
+                mapState.animateTo(userLatLng.lat, userLatLng.lng, 18.5f, durationMs = 900)
                 triggerReverseGeocode(userLatLng, overwriteAddress = true)
                 uiMode = AddressPickerUiState.LOCATION_PREVIEW
             } else if (gpsState is GpsState.Failure) {
@@ -195,6 +207,7 @@ fun AddressPickerDialog(
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
+        hasFineLocationPermission = isGranted
         if (isGranted) {
             detectExactCurrentLocation()
         } else {
@@ -215,16 +228,6 @@ fun AddressPickerDialog(
             }
         } else {
             triggerReverseGeocode(initialLatLng, overwriteAddress = false)
-        }
-    }
-
-    // Listen to camera movement when adjusting location on map
-    LaunchedEffect(cameraPositionState.isMoving) {
-        if (!cameraPositionState.isMoving && uiMode == AddressPickerUiState.ADJUSTING_ON_MAP) {
-            val centerTarget = cameraPositionState.position.target
-            if (centerTarget.latitude != 0.0 && centerTarget.longitude != 0.0) {
-                triggerReverseGeocode(centerTarget, overwriteAddress = true)
-            }
         }
     }
 
@@ -324,68 +327,66 @@ fun AddressPickerDialog(
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    // Google Map View
-                    GoogleMap(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("address_picker_map"),
-                        cameraPositionState = cameraPositionState,
-                        uiSettings = remember {
-                            MapUiSettings(
-                                zoomControlsEnabled = false,
-                                myLocationButtonEnabled = false,
-                                compassEnabled = true
+                    // Dual-provider Map View (Google, falling back to OpenStreetMap)
+                    SndmartMap(
+                        modifier = Modifier.fillMaxSize(),
+                        testTag = "address_picker_map",
+                        state = mapState,
+                        mapProviderState = mapProviderState,
+                        markers = buildList {
+                            // 1. Swiggy Blue Current-Location Marker
+                            exactGpsLatLng?.let { gps ->
+                                add(
+                                    SndmartMarker(
+                                        id = "exact_gps_dot",
+                                        position = gps,
+                                        title = "Your Exact GPS Location",
+                                        snippet = "Accuracy: ±${exactGpsAccuracy?.toInt() ?: 10}m",
+                                        tint = MarkerTint.BLUE
+                                    )
+                                )
+                            }
+                            // 2. Selected Delivery Pin (if not in floating adjust mode)
+                            if (uiMode != AddressPickerUiState.ADJUSTING_ON_MAP) {
+                                add(
+                                    SndmartMarker(
+                                        id = "delivery_pin",
+                                        position = selectedLatLng,
+                                        title = "Delivery Location",
+                                        snippet = "Doorstep Destination",
+                                        draggable = true,
+                                        tint = MarkerTint.RED
+                                    )
+                                )
+                            }
+                        },
+                        // Accuracy Halo Circle around the GPS dot
+                        circle = exactGpsLatLng?.let { gps ->
+                            SndmartCircleSpec(
+                                center = gps,
+                                radiusMeters = (exactGpsAccuracy?.toDouble() ?: 20.0).coerceIn(5.0, 50.0),
+                                fillColor = Color(0x281E88E5), // Translucent blue
+                                strokeColor = Color(0x991E88E5),
+                                strokeWidthPx = 2.5f
                             )
                         },
-                        properties = remember {
-                            MapProperties(
-                                isMyLocationEnabled = ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.ACCESS_FINE_LOCATION
-                                ) == PackageManager.PERMISSION_GRANTED
-                            )
-                        },
+                        myLocationEnabled = hasFineLocationPermission,
+                        mapType = mapType,
+                        osmTileUrlBase = osmTileConfig.tileUrlBase,
+                        osmSatelliteTileUrlBase = osmTileConfig.satelliteTileUrlBase,
                         onMapClick = { latLng ->
                             selectedLatLng = latLng
                             triggerReverseGeocode(latLng, overwriteAddress = true)
                             coroutineScope.launch {
-                                cameraPositionState.animate(CameraUpdateFactory.newLatLng(latLng))
+                                mapState.animateTo(latLng.lat, latLng.lng)
+                            }
+                        },
+                        onCameraIdle = { center ->
+                            if (uiMode == AddressPickerUiState.ADJUSTING_ON_MAP) {
+                                triggerReverseGeocode(center, overwriteAddress = true)
                             }
                         }
-                    ) {
-                        // 1. Swiggy Blue Current-Location Marker & Accuracy Halo Circle
-                        if (exactGpsLatLng != null) {
-                            val accRadius = (exactGpsAccuracy?.toDouble() ?: 20.0).coerceIn(5.0, 50.0)
-                            Circle(
-                                center = exactGpsLatLng!!,
-                                radius = accRadius,
-                                fillColor = Color(0x281E88E5), // Translucent blue
-                                strokeColor = Color(0x991E88E5),
-                                strokeWidth = 2.5f
-                            )
-                            Marker(
-                                state = rememberMarkerState(key = "exact_gps_dot", position = exactGpsLatLng!!).apply {
-                                    position = exactGpsLatLng!!
-                                },
-                                title = "Your Exact GPS Location",
-                                snippet = "Accuracy: ±${exactGpsAccuracy?.toInt() ?: 10}m",
-                                icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
-                            )
-                        }
-
-                        // 2. Selected Delivery Pin (if not in floating adjust mode)
-                        if (uiMode != AddressPickerUiState.ADJUSTING_ON_MAP) {
-                            Marker(
-                                state = rememberMarkerState(key = "delivery_pin", position = selectedLatLng).apply {
-                                    position = selectedLatLng
-                                },
-                                title = "Delivery Location",
-                                snippet = "Doorstep Destination",
-                                draggable = true,
-                                icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
-                            )
-                        }
-                    }
+                    )
 
                     // Centered Floating Pin when user is adjusting location on map
                     if (uiMode == AddressPickerUiState.ADJUSTING_ON_MAP) {
@@ -512,11 +513,10 @@ fun AddressPickerDialog(
                                                     coroutineScope.launch {
                                                         val target = MapLocationHelper.fetchPlaceLatLng(context, item)
                                                         if (target != null) {
-                                                            selectedLatLng = target
-                                                            cameraPositionState.animate(
-                                                                CameraUpdateFactory.newLatLngZoom(target, 18.0f)
-                                                            )
-                                                            triggerReverseGeocode(target, overwriteAddress = true)
+                                                            val geoTarget = GeoLatLng(target.latitude, target.longitude)
+                                                            selectedLatLng = geoTarget
+                                                            mapState.animateTo(geoTarget.lat, geoTarget.lng, 18.0f)
+                                                            triggerReverseGeocode(geoTarget, overwriteAddress = true)
                                                         }
                                                     }
                                                 }
@@ -706,7 +706,7 @@ fun AddressPickerDialog(
                         SmallFloatingActionButton(
                             onClick = {
                                 coroutineScope.launch {
-                                    cameraPositionState.animate(CameraUpdateFactory.zoomIn())
+                                    mapState.animateTo(mapState.center.lat, mapState.center.lng, mapState.zoom + 1f, durationMs = 250)
                                 }
                             },
                             containerColor = MaterialTheme.colorScheme.surface,
@@ -718,7 +718,7 @@ fun AddressPickerDialog(
                         SmallFloatingActionButton(
                             onClick = {
                                 coroutineScope.launch {
-                                    cameraPositionState.animate(CameraUpdateFactory.zoomOut())
+                                    mapState.animateTo(mapState.center.lat, mapState.center.lng, mapState.zoom - 1f, durationMs = 250)
                                 }
                             },
                             containerColor = MaterialTheme.colorScheme.surface,
@@ -727,6 +727,22 @@ fun AddressPickerDialog(
                         ) {
                             Icon(Icons.Default.Remove, contentDescription = "Zoom Out")
                         }
+                    }
+
+                    // Map provider switch + satellite toggle (middle-right edge, clear of the
+                    // top search bar and bottom FAB/zoom clusters)
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        MapProviderSwitchButton(mapProviderState = mapProviderState)
+                        MapTypeToggleButton(
+                            mapType = mapType,
+                            onToggle = { mapType = it },
+                            satelliteAvailable = mapProviderState.provider != com.example.data.maps.MapProvider.OSM || !osmTileConfig.satelliteTileUrlBase.isNullOrBlank()
+                        )
                     }
                 }
 
@@ -784,7 +800,7 @@ fun AddressPickerDialog(
                                     }
 
                                     Text(
-                                        text = "%.5f, %.5f".format(selectedLatLng.latitude, selectedLatLng.longitude),
+                                        text = "%.5f, %.5f".format(selectedLatLng.lat, selectedLatLng.lng),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = TextSecondary
                                     )
@@ -905,7 +921,7 @@ fun AddressPickerDialog(
                                 }
 
                                 Text(
-                                    text = if (isReverseGeocoding) "Updating address..." else addressLine.ifBlank { "Coordinates: %.5f, %.5f".format(selectedLatLng.latitude, selectedLatLng.longitude) },
+                                    text = if (isReverseGeocoding) "Updating address..." else addressLine.ifBlank { "Coordinates: %.5f, %.5f".format(selectedLatLng.lat, selectedLatLng.lng) },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = TextSecondary,
                                     maxLines = 2,
@@ -967,7 +983,7 @@ fun AddressPickerDialog(
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text(
-                                            "%.5f, %.5f".format(selectedLatLng.latitude, selectedLatLng.longitude),
+                                            "%.5f, %.5f".format(selectedLatLng.lat, selectedLatLng.lng),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = TextSecondary
                                         )
@@ -1068,7 +1084,7 @@ fun AddressPickerDialog(
                                             statusMessage = "Please enter complete address"
                                             return@Button
                                         }
-                                        if (!MapLocationHelper.isValidIndianCoordinate(selectedLatLng.latitude, selectedLatLng.longitude)) {
+                                        if (!MapLocationHelper.isValidIndianCoordinate(selectedLatLng.lat, selectedLatLng.lng)) {
                                             statusMessage = "This location looks incorrect. Please adjust the pin and try again."
                                             return@Button
                                         }
@@ -1085,8 +1101,8 @@ fun AddressPickerDialog(
                                                 phone = formattedPhone,
                                                 addressLine = addressLine.trim(),
                                                 landmark = landmark.trim().takeIf { it.isNotBlank() },
-                                                lat = selectedLatLng.latitude,
-                                                lng = selectedLatLng.longitude,
+                                                lat = selectedLatLng.lat,
+                                                lng = selectedLatLng.lng,
                                                 isDefault = existing?.isDefault ?: false
                                             )
 

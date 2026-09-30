@@ -204,11 +204,15 @@ fun AddressBookScreen(
 
     if (showAddEdit) {
         val userPhone = sessionManager.userPhone.collectAsState().value ?: ""
+        val selectedCity = sessionManager.selectedCity.collectAsState().value
         AddressPickerDialog(
             repository = repository,
             userId = userId ?: "",
             existing = editing,
             defaultPhone = userPhone,
+            cityCenter = selectedCity?.centerLat?.let { lat ->
+                selectedCity.centerLng?.let { lng -> com.example.ui.components.map.GeoLatLng(lat, lng) }
+            },
             onDismiss = { showAddEdit = false; editing = null },
             onSaved = {
                 showAddEdit = false
