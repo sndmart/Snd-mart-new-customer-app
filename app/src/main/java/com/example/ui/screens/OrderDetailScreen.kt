@@ -243,20 +243,26 @@ fun OrderDetailScreen(
                         ?: result.paymentData?.data?.optString("razorpay_signature")
                         ?: ""
 
+                    var isVerified = false
                     if (rzpPaymentId.isNotBlank() && rzpOrderId.isNotBlank()) {
-                        repository.verifyRazorpayPayment(
+                        val verifyResult = repository.verifyRazorpayPayment(
                             orderId = orderId,
                             razorpayOrderId = rzpOrderId,
                             razorpayPaymentId = rzpPaymentId,
                             razorpaySignature = rzpSignature
                         )
+                        isVerified = verifyResult.isSuccess && verifyResult.getOrNull()?.success == true
                     }
                     repository.syncRazorpayPayment(orderId)
 
                     isPayingUpi = false
                     activeRpData = null
 
-                    snackbarHostState.showSnackbar("Payment completed and verified!")
+                    if (isVerified) {
+                        snackbarHostState.showSnackbar("Payment completed and verified!")
+                    } else {
+                        snackbarHostState.showSnackbar("Payment received, confirming with your bank... you can check status below.")
+                    }
                     loadOrderData(isSilent = false)
                 }
             }

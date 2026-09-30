@@ -154,13 +154,15 @@ fun CheckoutScreen(
                         ?: ""
 
                     val orderId = currentOrder.id ?: ""
+                    var isVerified = false
                     if (rzpPaymentId.isNotBlank() && rzpOrderId.isNotBlank()) {
-                        repository.verifyRazorpayPayment(
+                        val verifyResult = repository.verifyRazorpayPayment(
                             orderId = orderId,
                             razorpayOrderId = rzpOrderId,
                             razorpayPaymentId = rzpPaymentId,
                             razorpaySignature = rzpSignature
                         )
+                        isVerified = verifyResult.isSuccess && verifyResult.getOrNull()?.success == true
                     }
                     repository.syncRazorpayPayment(orderId)
 
@@ -168,6 +170,9 @@ fun CheckoutScreen(
                     activePaymentOrder = null
                     activePaymentRpData = null
 
+                    if (!isVerified) {
+                        snackbarHostState.showSnackbar("Payment received, confirming with your bank... you can check status from your order.")
+                    }
                     onOrderPlacedSuccess(orderId)
                 }
             }
