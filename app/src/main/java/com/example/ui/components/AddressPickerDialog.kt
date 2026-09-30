@@ -311,11 +311,16 @@ fun AddressPickerDialog(
             },
             containerColor = MaterialTheme.colorScheme.background
         ) { paddingValues ->
-            Column(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
+            // Bottom sheet never grows past this, no matter how much content/text it holds,
+            // so it can't push its own "Use This Location" / "Save" button off-screen — the
+            // sheet scrolls internally instead (see each uiMode branch below).
+            val maxSheetHeight = maxHeight * 0.62f
+            Column(modifier = Modifier.fillMaxSize()) {
                 // --- MAP SECTION ---
                 Box(
                     modifier = Modifier
@@ -746,15 +751,20 @@ fun AddressPickerDialog(
                     shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
                     color = MaterialTheme.colorScheme.surface,
                     shadowElevation = 10.dp,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = maxSheetHeight)
                 ) {
                     when (uiMode) {
                         // MODE 1: SWIGGY-STYLE LOCATION PREVIEW
                         AddressPickerUiState.LOCATION_PREVIEW -> {
+                            Column(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(18.dp),
+                                    .weight(1f, fill = false)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(horizontal = 18.dp, vertical = 18.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 // GPS Accuracy & Locality Header
@@ -832,12 +842,18 @@ fun AddressPickerDialog(
                                         )
                                     }
                                 }
+                            }
 
-                                // Two Prominent Actions (Swiggy Pattern):
+                                // Two Prominent Actions (Swiggy Pattern) — kept outside the
+                                // scrollable content above so they're always visible/tappable.
                                 // 1. "Use This Location"
                                 // 2. "Adjust Location on Map"
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 18.dp)
+                                        .padding(bottom = 18.dp)
+                                        .navigationBarsPadding(),
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     OutlinedButton(
@@ -877,10 +893,13 @@ fun AddressPickerDialog(
 
                         // MODE 2: ADJUST PIN ON MAP MODE
                         AddressPickerUiState.ADJUSTING_ON_MAP -> {
+                            Column(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(18.dp),
+                                    .weight(1f, fill = false)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(horizontal = 18.dp, vertical = 18.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 Row(
@@ -908,13 +927,18 @@ fun AddressPickerDialog(
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                            }
 
+                                // Sticky confirm button — outside the scroll, always visible.
                                 Button(
                                     onClick = {
                                         uiMode = AddressPickerUiState.FORM_DETAILS
                                     },
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .padding(horizontal = 18.dp)
+                                        .padding(bottom = 18.dp)
+                                        .navigationBarsPadding()
                                         .height(48.dp)
                                         .testTag("confirm_pin_location_button"),
                                     shape = RoundedCornerShape(12.dp),
@@ -929,11 +953,13 @@ fun AddressPickerDialog(
 
                         // MODE 3: DETAILED ADDRESS FORM & SUPABASE PERSISTENCE
                         AddressPickerUiState.FORM_DETAILS -> {
+                            Column(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(16.dp)
-                                    .verticalScroll(rememberScrollState()),
+                                    .weight(1f, fill = false)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
                                 // GPS & Label Header
@@ -1031,7 +1057,18 @@ fun AddressPickerDialog(
                                         shape = RoundedCornerShape(12.dp)
                                     )
                                 }
+                            }
 
+                                // Sticky footer — status message + Save button, kept outside the
+                                // scroll above so the button is always reachable.
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp)
+                                        .padding(bottom = 16.dp)
+                                        .navigationBarsPadding(),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
                                 if (statusMessage != null) {
                                     Text(
                                         text = statusMessage!!,
@@ -1117,10 +1154,12 @@ fun AddressPickerDialog(
                                         Text("Save Delivery Address", fontWeight = FontWeight.Bold)
                                     }
                                 }
+                                }
                             }
                         }
                     }
                 }
+            }
             }
         }
     }
