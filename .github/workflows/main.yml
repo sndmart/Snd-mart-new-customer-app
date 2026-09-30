@@ -30,6 +30,14 @@ jobs:
       - name: Decode signing keystore
         run: echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > app/signing.keystore
 
+      - name: Print release keystore SHA-1/SHA-256 fingerprint
+        continue-on-error: true
+        run: |
+          keytool -list -v \
+            -keystore app/signing.keystore \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -alias "${{ secrets.KEY_ALIAS }}" | grep -E "SHA1:|SHA256:"
+
       - name: Create .env for build secrets
         run: |
           echo "GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> .env
