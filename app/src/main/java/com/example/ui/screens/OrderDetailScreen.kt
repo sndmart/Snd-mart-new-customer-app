@@ -37,6 +37,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.model.*
 import com.example.util.SupportConstants
 import com.example.data.repository.SndmartRepository
@@ -55,6 +58,30 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+
+private fun parseOrderTimestampMs(isoString: String?): Long {
+    if (isoString.isNullOrBlank()) return System.currentTimeMillis()
+    val patterns = listOf(
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+        "yyyy-MM-dd'T'HH:mm:ssXXX",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
+        "yyyy-MM-dd'T'HH:mm:ss.SSS",
+        "yyyy-MM-dd'T'HH:mm:ss"
+    )
+    for (p in patterns) {
+        try {
+            val sdf = SimpleDateFormat(p, Locale.US)
+            sdf.timeZone = TimeZone.getTimeZone("UTC")
+            val d = sdf.parse(isoString)
+            if (d != null) return d.time
+        } catch (_: Exception) {}
+    }
+    return System.currentTimeMillis()
+}
 
 private fun Context.findActivity(): Activity? {
     var ctx = this
@@ -97,12 +124,14 @@ fun OrderDetailScreen(
     var reviewSubmitted by remember { mutableStateOf(false) }
     var isSubmittingReview by remember { mutableStateOf(false) }
     var reviewedOrderIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-
+    var orderCancellation by remember { mutableStateOf<OrderCancellation?>(null) }
 
     // Payment retry state
     var isPayingUpi by remember { mutableStateOf(false) }
+    var isCheckingPaymentStatus by remember { mutableStateOf(false) }
     var upiPaymentMessage by remember { mutableStateOf("Starting payment...") }
     var activeRpData by remember { mutableStateOf<RazorpayOrderResponse?>(null) }
+    var currentTimeMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
     // Polling function for active orders
     fun loadOrderData(isSilent: Boolean = false) {
@@ -114,6 +143,12 @@ fun OrderDetailScreen(
             if (oRes.isSuccess) {
                 val fetchedOrder = oRes.getOrNull()
                 order = fetchedOrder
+                if (fetchedOrder?.status?.lowercase() == "cancelled") {
+                    val cancelRes = repository.getOrderCancellation(orderId)
+                    if (cancelRes.isSuccess) {
+                        orderCancellation = cancelRes.getOrNull()
+                    }
+                }
                 val itemsRes = repository.getOrderItems(orderId)
                 if (itemsRes.isSuccess) {
                     orderItems = itemsRes.getOrNull() ?: emptyList()
@@ -176,6 +211,7 @@ fun OrderDetailScreen(
         }
     }
 
+    // Razorpay result callback listener
     LaunchedEffect(Unit) {
         RazorpayPaymentManager.paymentResult.collectLatest { result ->
             if (!isPayingUpi) return@collectLatest
@@ -184,12 +220,16 @@ fun OrderDetailScreen(
                 is RazorpayPaymentResult.Error -> {
                     isPayingUpi = false
                     activeRpData = null
+                    coroutineScope.launch {
+                        repository.syncRazorpayPayment(orderId)
+                        loadOrderData(isSilent = false)
+                    }
                     val isDismissOrCancelled = result.code == 0 ||
                         result.response?.contains("cancelled", ignoreCase = true) == true
                     if (isDismissOrCancelled) {
-                        snackbarHostState.showSnackbar("Payment cancelled.")
+                        snackbarHostState.showSnackbar("Payment pending. Please complete payment within the time limit.")
                     } else {
-                        val errMsg = result.response?.takeIf { it.isNotBlank() } ?: "Payment could not be completed."
+                        val errMsg = result.response?.takeIf { it.isNotBlank() } ?: "Payment not completed."
                         snackbarHostState.showSnackbar(errMsg)
                     }
                 }
@@ -203,24 +243,46 @@ fun OrderDetailScreen(
                         ?: result.paymentData?.data?.optString("razorpay_signature")
                         ?: ""
 
-                    val verifyResult = repository.verifyRazorpayPayment(
-                        orderId = orderId,
-                        razorpayOrderId = rzpOrderId,
-                        razorpayPaymentId = rzpPaymentId,
-                        razorpaySignature = rzpSignature
-                    )
+                    if (rzpPaymentId.isNotBlank() && rzpOrderId.isNotBlank()) {
+                        repository.verifyRazorpayPayment(
+                            orderId = orderId,
+                            razorpayOrderId = rzpOrderId,
+                            razorpayPaymentId = rzpPaymentId,
+                            razorpaySignature = rzpSignature
+                        )
+                    }
+                    repository.syncRazorpayPayment(orderId)
 
                     isPayingUpi = false
                     activeRpData = null
 
-                    if (verifyResult.isFailure || verifyResult.getOrNull()?.success != true) {
-                        snackbarHostState.showSnackbar("Payment could not be verified. If money was deducted, it will be refunded shortly - contact support if this persists.")
-                    } else {
-                        snackbarHostState.showSnackbar("Payment successful and verified!")
-                        loadOrderData(isSilent = false)
-                    }
+                    snackbarHostState.showSnackbar("Payment completed and verified!")
+                    loadOrderData(isSilent = false)
                 }
             }
+        }
+    }
+
+    // App reopened with an order still payment_status = 'pending' -> call sync-razorpay-payment and reload
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                coroutineScope.launch {
+                    val o = order
+                    if (o != null && o.paymentMethod.lowercase() == "upi" &&
+                        (o.paymentStatus.lowercase() == "pending" || o.paymentStatus.lowercase() == "failed") &&
+                        o.status.lowercase() == "pending"
+                    ) {
+                        repository.syncRazorpayPayment(orderId)
+                    }
+                    loadOrderData(isSilent = true)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -235,6 +297,35 @@ fun OrderDetailScreen(
                 break
             }
             loadOrderData(isSilent = true)
+        }
+    }
+
+    val isUpiPaymentPending = order != null &&
+        order!!.paymentMethod.lowercase() == "upi" &&
+        (order!!.paymentStatus.lowercase() == "pending" || order!!.paymentStatus.lowercase() == "failed") &&
+        order!!.status.lowercase() == "pending"
+
+    // Poll sync-razorpay-payment every 20 seconds while banner is visible
+    LaunchedEffect(isUpiPaymentPending, orderId) {
+        if (!isUpiPaymentPending) return@LaunchedEffect
+        while (isUpiPaymentPending) {
+            delay(20000L) // 20s poll
+            repository.syncRazorpayPayment(orderId)
+            loadOrderData(isSilent = true)
+            val currentStatus = order?.status?.lowercase()
+            val currentPaymentStatus = order?.paymentStatus?.lowercase()
+            if (currentStatus != "pending" || (currentPaymentStatus != "pending" && currentPaymentStatus != "failed")) {
+                break
+            }
+        }
+    }
+
+    // Countdown tick effect every 1 second
+    LaunchedEffect(isUpiPaymentPending, order?.createdAt) {
+        if (!isUpiPaymentPending) return@LaunchedEffect
+        while (isUpiPaymentPending) {
+            currentTimeMs = System.currentTimeMillis()
+            delay(1000L)
         }
     }
 
@@ -335,6 +426,222 @@ fun OrderDetailScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    // UPI Payment Pending Banner
+                    if (isUpiPaymentPending) {
+                        item {
+                            val createdAtMs = remember(currentOrder.createdAt) { parseOrderTimestampMs(currentOrder.createdAt) }
+                            val deadlineMs = createdAtMs + (15 * 60 * 1000L)
+                            val remainingMs = maxOf(0L, deadlineMs - currentTimeMs)
+                            val mm = (remainingMs / 1000) / 60
+                            val ss = (remainingMs / 1000) % 60
+                            val countdownFormatted = String.format(Locale.US, "%02d:%02d", mm, ss)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("upi_payment_pending_banner"),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                                border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFFF9800))
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .background(Color(0xFFFFE0B2), CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Schedule,
+                                                contentDescription = null,
+                                                tint = Color(0xFFE65100),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column {
+                                            Text(
+                                                "Payment Pending",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFE65100)
+                                            )
+                                            Text(
+                                                "Time remaining: $countdownFormatted",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = Color(0xFFD84315)
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    Text(
+                                        "Payment pending - complete payment within $countdownFormatted or the order will be cancelled automatically.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        lineHeight = 20.sp
+                                    )
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        // "Pay now" (reopens Razorpay for the SAME order - never create a new order)
+                                        Button(
+                                            onClick = {
+                                                coroutineScope.launch {
+                                                    isPayingUpi = true
+                                                    upiPaymentMessage = "Opening UPI payment..."
+                                                    val rpRes = repository.createRazorpayOrder(orderId)
+                                                    if (rpRes.isFailure) {
+                                                        isPayingUpi = false
+                                                        snackbarHostState.showSnackbar("Could not start payment. Please try again.")
+                                                        return@launch
+                                                    }
+                                                    val rpData = rpRes.getOrNull()!!
+                                                    val activity = context.findActivity()
+                                                    if (activity == null) {
+                                                        isPayingUpi = false
+                                                        snackbarHostState.showSnackbar("Unable to open payment screen. Please try again.")
+                                                        return@launch
+                                                    }
+                                                    activeRpData = rpData
+                                                    val openRes = RazorpayPaymentManager.startUpiCheckout(
+                                                        activity = activity,
+                                                        keyId = rpData.keyId,
+                                                        amountInPaise = rpData.amountInPaise,
+                                                        currency = rpData.currency,
+                                                        razorpayOrderId = rpData.razorpayOrderId,
+                                                        orderNumber = currentOrder.orderNumber.ifBlank { currentOrder.id ?: "" },
+                                                        userPhone = null,
+                                                        userEmail = null
+                                                    )
+                                                    if (openRes.isFailure) {
+                                                        isPayingUpi = false
+                                                        activeRpData = null
+                                                        snackbarHostState.showSnackbar("Could not start payment. Please try again.")
+                                                    }
+                                                }
+                                            },
+                                            enabled = !isPayingUpi && !isCheckingPaymentStatus,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(44.dp)
+                                                .testTag("pay_now_button"),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            if (isPayingUpi) {
+                                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Opening...", fontSize = 12.sp)
+                                            } else {
+                                                Icon(Icons.Default.Payment, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Pay now", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            }
+                                        }
+
+                                        // "I've paid - check status" (calls sync-razorpay-payment)
+                                        OutlinedButton(
+                                            onClick = {
+                                                coroutineScope.launch {
+                                                    isCheckingPaymentStatus = true
+                                                    val syncRes = repository.syncRazorpayPayment(orderId)
+                                                    isCheckingPaymentStatus = false
+                                                    if (syncRes.isSuccess) {
+                                                        val r = syncRes.getOrNull()
+                                                        if (r?.paymentStatus == "paid") {
+                                                            snackbarHostState.showSnackbar("Payment confirmed!")
+                                                        } else {
+                                                            snackbarHostState.showSnackbar(r?.message ?: "Payment still pending. If already paid, please allow a moment.")
+                                                        }
+                                                    } else {
+                                                        snackbarHostState.showSnackbar(syncRes.exceptionOrNull()?.message ?: "Could not verify payment status.")
+                                                    }
+                                                    loadOrderData(isSilent = false)
+                                                }
+                                            },
+                                            enabled = !isPayingUpi && !isCheckingPaymentStatus,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(44.dp)
+                                                .testTag("check_payment_status_button"),
+                                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFE65100)),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF9800)),
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            if (isCheckingPaymentStatus) {
+                                                CircularProgressIndicator(color = Color(0xFFE65100), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Checking...", fontSize = 11.sp)
+                                            } else {
+                                                Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("I've paid - check status", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, maxLines = 1)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // UPI 15-Minute Timeout Cancellation Banner
+                    val cancelReason = orderCancellation?.reason
+                        ?: statusHistory.find { it.status.lowercase() == "cancelled" }?.note
+                        ?: ""
+                    val isUpiExpiredCancellation = currentOrder.status.lowercase() == "cancelled" &&
+                        cancelReason.contains("UPI payment not received within 15 minutes", ignoreCase = true)
+
+                    if (isUpiExpiredCancellation) {
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("upi_expired_cancelled_banner"),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = PastelCoral),
+                                border = androidx.compose.foundation.BorderStroke(1.5.dp, NaturalBadgeRed.copy(alpha = 0.4f))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cancel,
+                                        contentDescription = null,
+                                        tint = NaturalBadgeRed,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            "Order Cancelled",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = NaturalBadgeRed
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            "Order cancelled because the payment was not completed. If money was deducted, it will be refunded by your bank/UPI app automatically.",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            lineHeight = 20.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 1. Delivery OTP Card (Prominently displayed ONLY when out_for_delivery and partner is assigned)
                     if (showLiveTracking && currentOrder.status.lowercase() == "out_for_delivery" && !deliveryAssignment?.deliveryOtp.isNullOrBlank()) {
                         item {
@@ -491,7 +798,8 @@ fun OrderDetailScreen(
                                 Spacer(modifier = Modifier.height(14.dp))
                                 OrderStatusStepper(
                                     currentStatus = currentOrder.status,
-                                    history = statusHistory
+                                    history = statusHistory,
+                                    cancellationReason = orderCancellation?.reason
                                 )
                             }
                         }
@@ -831,7 +1139,8 @@ fun OrderDetailScreen(
 @Composable
 fun OrderStatusStepper(
     currentStatus: String,
-    history: List<OrderStatusHistory>
+    history: List<OrderStatusHistory>,
+    cancellationReason: String? = null
 ) {
     val steps = listOf(
         "pending" to "Order Placed",
@@ -851,12 +1160,15 @@ fun OrderStatusStepper(
             val s = it.status.lowercase()
             s == "cancelled" || s == "rejected"
         }
+        val effectiveReason = cancellationReason ?: cancelEntry?.note ?: ""
+        val isUpiTimeout = effectiveReason.contains("UPI payment not received within 15 minutes", ignoreCase = true)
+
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = PastelCoral,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
                 Icon(Icons.Default.Cancel, contentDescription = null, tint = NaturalBadgeRed)
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
@@ -865,7 +1177,24 @@ fun OrderStatusStepper(
                         fontWeight = FontWeight.Bold,
                         color = NaturalBadgeRed
                     )
+                    if (isUpiTimeout) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Order cancelled because the payment was not completed. If money was deducted, it will be refunded by your bank/UPI app automatically.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NaturalBadgeRed,
+                            lineHeight = 16.sp
+                        )
+                    } else if (effectiveReason.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            effectiveReason,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NaturalBadgeRed
+                        )
+                    }
                     if (!cancelEntry?.createdAt.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             cancelEntry!!.createdAt.take(16).replace("T", " "),
                             fontSize = 11.sp,

@@ -121,21 +121,28 @@ fun CheckoutScreen(
             val currentRpData = activePaymentRpData
             when (result) {
                 is RazorpayPaymentResult.Error -> {
+                    val orderId = currentOrder.id ?: ""
                     isPlacingOrder = false
                     activePaymentOrder = null
                     activePaymentRpData = null
+                    coroutineScope.launch {
+                        repository.syncRazorpayPayment(orderId)
+                    }
                     val isDismissOrCancelled = result.code == 0 ||
                         result.response?.contains("cancelled", ignoreCase = true) == true
                     if (isDismissOrCancelled) {
-                        snackbarHostState.showSnackbar("Payment cancelled. You can retry from your Orders page.")
+                        snackbarHostState.showSnackbar("Payment pending. Complete payment within the time limit.")
                     } else {
                         val errMsg = result.response?.takeIf { it.isNotBlank() }
-                            ?: "Payment cancelled. You can retry from your Orders page."
+                            ?: "Payment not completed."
                         snackbarHostState.showSnackbar(errMsg)
+                    }
+                    if (orderId.isNotBlank()) {
+                        onOrderPlacedSuccess(orderId)
                     }
                 }
                 is RazorpayPaymentResult.Success -> {
-                    // Step 4 — Verify the payment server-side
+                    // Step 4 — Verify the payment server-side and sync
                     placingOrderMessage = "Verifying payment..."
                     isPlacingOrder = true
                     val rzpPaymentId = result.paymentData?.paymentId ?: result.razorpayPaymentId ?: ""
@@ -146,24 +153,22 @@ fun CheckoutScreen(
                         ?: result.paymentData?.data?.optString("razorpay_signature")
                         ?: ""
 
-                    val verifyResult = repository.verifyRazorpayPayment(
-                        orderId = currentOrder.id ?: "",
-                        razorpayOrderId = rzpOrderId,
-                        razorpayPaymentId = rzpPaymentId,
-                        razorpaySignature = rzpSignature
-                    )
+                    val orderId = currentOrder.id ?: ""
+                    if (rzpPaymentId.isNotBlank() && rzpOrderId.isNotBlank()) {
+                        repository.verifyRazorpayPayment(
+                            orderId = orderId,
+                            razorpayOrderId = rzpOrderId,
+                            razorpayPaymentId = rzpPaymentId,
+                            razorpaySignature = rzpSignature
+                        )
+                    }
+                    repository.syncRazorpayPayment(orderId)
 
                     isPlacingOrder = false
                     activePaymentOrder = null
                     activePaymentRpData = null
 
-                    if (verifyResult.isFailure || verifyResult.getOrNull()?.success != true) {
-                        val err = "Payment could not be verified. If money was deducted, it will be refunded shortly - contact support if this persists."
-                        placementError = err
-                        snackbarHostState.showSnackbar(err)
-                    } else {
-                        onOrderPlacedSuccess(currentOrder.id ?: "")
-                    }
+                    onOrderPlacedSuccess(orderId)
                 }
             }
         }

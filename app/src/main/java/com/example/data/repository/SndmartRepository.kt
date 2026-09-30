@@ -2475,6 +2475,80 @@ class SndmartRepository(
         }
     }
 
+    suspend fun syncRazorpayPayment(orderId: String): Result<SyncRazorpayPaymentResponse> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.failure(Exception("Supabase API key is not configured"))
+        }
+        return try {
+            val request = SyncRazorpayPaymentRequest(orderId = orderId)
+            val response = api.syncRazorpayPayment(request)
+            if (response.isSuccessful && response.body() != null) {
+                val bodyStr = response.body()!!.string()
+                Log.d(TAG, "syncRazorpayPayment response: $bodyStr")
+                val json = try { JSONObject(bodyStr) } catch (_: Exception) { JSONObject() }
+                val success = json.optBoolean("success", true)
+                val status = if (json.has("status") && !json.isNull("status")) json.optString("status") else null
+                val paymentStatus = if (json.has("payment_status") && !json.isNull("payment_status")) json.optString("payment_status") else null
+                val message = if (json.has("message") && !json.isNull("message")) json.optString("message") else null
+                val error = if (json.has("error") && !json.isNull("error")) json.optString("error") else null
+                Result.success(
+                    SyncRazorpayPaymentResponse(
+                        success = success,
+                        status = status,
+                        paymentStatus = paymentStatus,
+                        message = message,
+                        error = error
+                    )
+                )
+            } else {
+                val errorStr = response.errorBody()?.string() ?: ""
+                val cleanMsg = extractCleanErrorMessage(errorStr, response.code())
+                Log.e(TAG, "syncRazorpayPayment failed HTTP ${response.code()}: $cleanMsg")
+                Result.failure(Exception(cleanMsg.ifBlank { "Failed to sync payment status" }))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in syncRazorpayPayment: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getOrderCancellation(orderId: String): Result<OrderCancellation?> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.success(null)
+        }
+        return try {
+            val res = api.getOrderCancellation(orderId = "eq.$orderId")
+            if (res.isSuccessful) {
+                Result.success(res.body()?.firstOrNull())
+            } else {
+                Result.failure(Exception("Failed to fetch cancellation details"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getPendingUpiOrders(userId: String): Result<List<Order>> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.success(emptyList())
+        }
+        return try {
+            val response = api.getOrders(customerId = "eq.$userId", order = "created_at.desc", limit = 10)
+            if (response.isSuccessful && response.body() != null) {
+                val orders = response.body()!!.filter {
+                    it.paymentMethod.lowercase() == "upi" &&
+                    (it.paymentStatus.lowercase() == "pending" || it.paymentStatus.lowercase() == "failed") &&
+                    it.status.lowercase() == "pending"
+                }
+                Result.success(orders)
+            } else {
+                Result.success(emptyList())
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // --- ORDERS (LIST & DETAIL) ---
     suspend fun getOrders(userId: String, limit: Int? = null, offset: Int? = null): Result<List<Order>> {
         return try {

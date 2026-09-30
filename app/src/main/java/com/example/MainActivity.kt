@@ -374,6 +374,15 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                 coroutineScope.launch {
                                     repository.refreshUnreadNotificationCount(currentUserId)
                                 }
+                                coroutineScope.launch {
+                                    val pendingOrdersRes = repository.getPendingUpiOrders(currentUserId)
+                                    pendingOrdersRes.getOrNull()?.forEach { pendingOrder ->
+                                        val pOrderId = pendingOrder.id
+                                        if (!pOrderId.isNullOrBlank()) {
+                                            repository.syncRazorpayPayment(pOrderId)
+                                        }
+                                    }
+                                }
                             }
                             coroutineScope.launch {
                                 try {

@@ -486,5 +486,17 @@ interface SupabaseApi {
     suspend fun verifyRazorpayPayment(
         @Body body: VerifyRazorpayPaymentRequest
     ): Response<ResponseBody>
+
+    @POST("functions/v1/sync-razorpay-payment")
+    suspend fun syncRazorpayPayment(
+        @Body body: SyncRazorpayPaymentRequest
+    ): Response<ResponseBody>
+
+    @GET("rest/v1/order_cancellations")
+    suspend fun getOrderCancellation(
+        @Query("order_id") orderId: String,
+        @Query("select") select: String = "*",
+        @Query("limit") limit: Int = 1
+    ): Response<List<OrderCancellation>>
 }
 

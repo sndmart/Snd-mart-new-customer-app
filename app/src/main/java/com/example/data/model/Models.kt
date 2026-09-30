@@ -523,3 +523,26 @@ data class VerifyRazorpayPaymentResponse(
     @Json(name = "error") val error: String? = null
 )
 
+@JsonClass(generateAdapter = true)
+data class SyncRazorpayPaymentRequest(
+    @Json(name = "order_id") val orderId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncRazorpayPaymentResponse(
+    @Json(name = "success") val success: Boolean = false,
+    @Json(name = "status") val status: String? = null,
+    @Json(name = "payment_status") val paymentStatus: String? = null,
+    @Json(name = "message") val message: String? = null,
+    @Json(name = "error") val error: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class OrderCancellation(
+    val id: String? = null,
+    @Json(name = "order_id") val orderId: String = "",
+    val reason: String? = null,
+    @Json(name = "cancelled_by") val cancelledBy: String? = null,
+    @Json(name = "created_at") val createdAt: String? = null
+)
+

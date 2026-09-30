@@ -285,7 +285,33 @@ fun OrderCardItem(
                         )
                     }
                 }
-                OrderStatusBadge(order.status)
+                val isUpiPaymentPending = order.paymentMethod.lowercase() == "upi" &&
+                    (order.paymentStatus.lowercase() == "pending" || order.paymentStatus.lowercase() == "failed") &&
+                    order.status.lowercase() == "pending"
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isUpiPaymentPending) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFFFE0B2),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF9800).copy(alpha = 0.6f))
+                        ) {
+                            Text(
+                                text = "Payment pending",
+                                color = Color(0xFFE65100),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .testTag("order_item_payment_pending_badge")
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    OrderStatusBadge(order.status)
+                }
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
