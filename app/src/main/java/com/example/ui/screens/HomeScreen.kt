@@ -413,27 +413,11 @@ fun HomeScreen(
             if (res.isSuccess) {
                 val newHotels = res.getOrNull() ?: emptyList()
                 if (reset) {
-                    hotels = newHotels.sortedWith(
-                        compareBy<Vendor> { vendor ->
-                            when {
-                                vendor.isActive && vendor.isFeatured == true -> 0
-                                vendor.isActive -> 1
-                                else -> 2
-                            }
-                        }.thenBy { it.name.lowercase() }
-                    )
+                    hotels = newHotels.sortedWith(HotelComparator)
                     lastLoadedHotelsCityId = cityId
                     lastLoadedHotelsQuery = query
                 } else {
-                    hotels = (hotels + newHotels).distinctBy { it.id }.sortedWith(
-                        compareBy<Vendor> { vendor ->
-                            when {
-                                vendor.isActive && vendor.isFeatured == true -> 0
-                                vendor.isActive -> 1
-                                else -> 2
-                            }
-                        }.thenBy { it.name.lowercase() }
-                    )
+                    hotels = (hotels + newHotels).distinctBy { it.id }.sortedWith(HotelComparator)
                 }
                 hasMoreHotels = newHotels.size >= HOTEL_PAGE_SIZE
             } else {
@@ -1474,7 +1458,7 @@ fun HotelCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (vendor.isActive && vendor.isFeatured == true) {
+                    if (vendor.isFeatured == true) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = NaturalOceanBlue,

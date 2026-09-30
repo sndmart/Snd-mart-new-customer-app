@@ -308,7 +308,7 @@ fun OrderDetailScreen(
     // Poll sync-razorpay-payment every 20 seconds while banner is visible
     LaunchedEffect(isUpiPaymentPending, orderId) {
         if (!isUpiPaymentPending) return@LaunchedEffect
-        while (isUpiPaymentPending) {
+        while (true) {
             delay(20000L) // 20s poll
             repository.syncRazorpayPayment(orderId)
             loadOrderData(isSilent = true)
@@ -321,10 +321,18 @@ fun OrderDetailScreen(
     }
 
     // Countdown tick effect every 1 second
+    var hasSyncedOnExpiry by remember(orderId) { mutableStateOf(false) }
     LaunchedEffect(isUpiPaymentPending, order?.createdAt) {
         if (!isUpiPaymentPending) return@LaunchedEffect
-        while (isUpiPaymentPending) {
+        val createdAtMs = parseOrderTimestampMs(order?.createdAt)
+        val deadlineMs = createdAtMs + (15 * 60 * 1000L)
+        while (true) {
             currentTimeMs = System.currentTimeMillis()
+            if (currentTimeMs >= deadlineMs && !hasSyncedOnExpiry) {
+                hasSyncedOnExpiry = true
+                repository.syncRazorpayPayment(orderId)
+                loadOrderData(isSilent = true)
+            }
             delay(1000L)
         }
     }

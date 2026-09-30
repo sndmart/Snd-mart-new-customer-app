@@ -38,8 +38,8 @@ class LocationDetector(private val context: Context) {
         return fine || coarse
     }
 
-    suspend fun getCurrentCoordinates(): Location? {
-        return HighAccuracyLocationManager.getAccurateGpsLocation(context) {}
+    suspend fun getCurrentCoordinates(onProgress: (GpsState) -> Unit = {}): Location? {
+        return HighAccuracyLocationManager.getAccurateGpsLocation(context, onProgress)
     }
 
     suspend fun getCityNameFromCoordinates(latitude: Double, longitude: Double): String? = withContext(Dispatchers.IO) {

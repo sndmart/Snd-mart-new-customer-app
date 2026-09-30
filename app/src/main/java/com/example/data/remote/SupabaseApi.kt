@@ -108,7 +108,7 @@ interface SupabaseApi {
         @Query("is_active") isActive: String? = null,
         @Query("name", encoded = true) name: String? = null,
         @Query("select") select: String = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time",
-        @Query("order") order: String = "is_active.desc,is_featured.desc,name.asc",
+        @Query("order") order: String = "is_active.desc,is_featured.desc.nullslast,name.asc",
         @Query("limit") limit: Int? = null,
         @Query("offset") offset: Int? = null
     ): Response<List<Vendor>>

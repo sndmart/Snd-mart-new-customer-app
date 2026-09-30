@@ -45,6 +45,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.data.location.GpsState
 import com.example.data.location.HighAccuracyLocationManager
 import com.example.data.location.LocationDetector
 import com.example.data.model.City
@@ -154,6 +155,7 @@ fun LocationOnboardingScreen(
 
     // GPS & City Detection state
     var isDetectingGps by remember { mutableStateOf(false) }
+    var onboardingGpsState by remember { mutableStateOf<GpsState>(GpsState.Idle) }
     var detectedCity by remember { mutableStateOf<City?>(sessionManager.selectedCity.value) }
     var detectedCityMessage by remember { mutableStateOf<String?>(null) }
     var isUnsupportedArea by remember { mutableStateOf(false) }

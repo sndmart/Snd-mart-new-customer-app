@@ -62,6 +62,17 @@ data class Vendor(
     val imageUrl: String? get() = bannerUrl
 }
 
+val Vendor.sortTier: Int
+    get() = when {
+        isActive && isFeatured == true -> 0
+        isActive -> 1
+        isFeatured == true -> 2
+        else -> 3
+    }
+
+val HotelComparator: Comparator<Vendor> = compareBy<Vendor> { it.sortTier }
+    .thenBy { it.name.lowercase() }
+
 @JsonClass(generateAdapter = true)
 data class OperatingSlot(
     val id: String = "",

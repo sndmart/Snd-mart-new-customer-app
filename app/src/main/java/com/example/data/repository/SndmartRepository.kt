@@ -749,15 +749,20 @@ class SndmartRepository(
             val demo = if (!searchQuery.isNullOrBlank())
                 DemoCatalog.HOTELS.filter { it.name.contains(searchQuery, ignoreCase = true) }
             else DemoCatalog.HOTELS
-            val paged = demo.drop(offset).take(limit)
+            val sortedDemo = demo.sortedWith(HotelComparator)
+            val paged = sortedDemo.drop(offset).take(limit)
             if (offset == 0) {
-                hotelsCache[cacheKey] = CacheEntry(data = paged, hasMore = demo.size > limit)
+                hotelsCache[cacheKey] = CacheEntry(data = sortedDemo.take(limit), hasMore = sortedDemo.size > limit)
                 if (searchQuery.isNullOrBlank()) {
-                    cachedHotelsByCity[cityId] = paged
+                    cachedHotelsByCity[cityId] = sortedDemo.take(limit)
                 }
             } else {
                 val existing = hotelsCache[cacheKey]?.data ?: emptyList()
-                hotelsCache[cacheKey] = CacheEntry(data = (existing + paged).distinctBy { it.id }, hasMore = demo.size > offset + limit)
+                val combined = (existing + paged).distinctBy { it.id }.sortedWith(HotelComparator)
+                hotelsCache[cacheKey] = CacheEntry(data = combined, hasMore = sortedDemo.size > offset + limit)
+                if (searchQuery.isNullOrBlank()) {
+                    cachedHotelsByCity[cityId] = combined
+                }
             }
             return Result.success(paged)
         }
@@ -771,20 +776,12 @@ class SndmartRepository(
                 approvalStatus = "eq.approved",
                 name = nameQuery,
                 select = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time",
-                order = "is_featured.desc",
+                order = "is_active.desc,is_featured.desc.nullslast,name.asc",
                 limit = limit,
                 offset = offset
             )
             if (response.isSuccessful && response.body() != null) {
-                val sorted = response.body()!!.sortedWith(
-                    compareBy<Vendor> { vendor ->
-                        when {
-                            vendor.isActive && vendor.isFeatured == true -> 0
-                            vendor.isActive -> 1
-                            else -> 2
-                        }
-                    }.thenBy { it.name.lowercase() }
-                )
+                val sorted = response.body()!!.sortedWith(HotelComparator)
                 if (offset == 0) {
                     hotelsCache[cacheKey] = CacheEntry(data = sorted, hasMore = sorted.size >= limit)
                     if (searchQuery.isNullOrBlank()) {
@@ -792,8 +789,11 @@ class SndmartRepository(
                     }
                 } else {
                     val existing = hotelsCache[cacheKey]?.data ?: emptyList()
-                    val combined = (existing + sorted).distinctBy { it.id }
+                    val combined = (existing + sorted).distinctBy { it.id }.sortedWith(HotelComparator)
                     hotelsCache[cacheKey] = CacheEntry(data = combined, hasMore = sorted.size >= limit)
+                    if (searchQuery.isNullOrBlank()) {
+                        cachedHotelsByCity[cityId] = combined
+                    }
                 }
                 Result.success(sorted)
             } else {
