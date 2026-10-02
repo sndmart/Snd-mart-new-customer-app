@@ -958,14 +958,26 @@ fun HomeScreen(
                                 }
                             }
 
-                            items(filteredHotels, key = { it.id }) { hotel ->
-                                HotelCard(
-                                    vendor = hotel,
-                                    repository = repository,
-                                    onClick = {
-                                        onNavigateToHotelMenu(hotel.id, hotel.name)
+                            // 4 sections, in this order: Featured+Open, Open, Featured+Closed,
+                            // Closed. filteredHotels is already sorted by Vendor.sortTier (see
+                            // HotelComparator), so grouping by tier preserves that order and the
+                            // alphabetical order within each tier.
+                            HotelListSections.forEach { section ->
+                                val sectionHotels = filteredHotels.filter { it.sortTier == section.tier }
+                                if (sectionHotels.isNotEmpty()) {
+                                    item(key = "hotel_section_${section.tier}") {
+                                        HotelSectionHeader(title = section.title)
                                     }
-                                )
+                                    items(sectionHotels, key = { it.id }) { hotel ->
+                                        HotelCard(
+                                            vendor = hotel,
+                                            repository = repository,
+                                            onClick = {
+                                                onNavigateToHotelMenu(hotel.id, hotel.name)
+                                            }
+                                        )
+                                    }
+                                }
                             }
 
                             if (hasMoreHotels) {
@@ -1391,6 +1403,27 @@ fun GroceryVariantPickerSheet(
             }
         }
     }
+}
+
+private data class HotelListSection(val tier: Int, val title: String)
+
+// Order matches Vendor.sortTier exactly: Featured+Open, Open, Featured+Closed, Closed.
+private val HotelListSections = listOf(
+    HotelListSection(0, "Featured Hotels – Open Now"),
+    HotelListSection(1, "Open Hotels"),
+    HotelListSection(2, "Featured Hotels – Closed"),
+    HotelListSection(3, "Closed Hotels")
+)
+
+@Composable
+private fun HotelSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold,
+        color = TextPrimary,
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+    )
 }
 
 @Composable

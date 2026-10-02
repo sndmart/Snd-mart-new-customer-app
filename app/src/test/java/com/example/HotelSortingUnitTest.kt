@@ -78,6 +78,24 @@ class HotelSortingUnitTest {
     }
 
     @Test
+    fun vendor_sortTier_usesOpenNowNotJustIsActive() {
+        // isActive=true alone no longer means "open" for sorting purposes: isOpen and
+        // operating hours matter too (this is the bug being fixed — previously a vendor
+        // that was active-but-manually-closed, or active-but-outside-hours, sorted as if
+        // it were open).
+        val activeButManuallyClosed = Vendor(id = "1", name = "A", isActive = true, isFeatured = true, isOpen = false)
+        assertEquals(2, activeButManuallyClosed.sortTier) // Featured Hotels – Closed, not tier 0
+
+        val activeNonFeaturedButManuallyClosed = Vendor(id = "2", name = "B", isActive = true, isFeatured = false, isOpen = false)
+        assertEquals(3, activeNonFeaturedButManuallyClosed.sortTier) // Closed Hotels, not tier 1
+
+        // isActive=false still forces "closed" regardless of isOpen, matching the vendor
+        // genuinely being unavailable.
+        val inactiveButMarkedOpen = Vendor(id = "3", name = "C", isActive = false, isFeatured = true, isOpen = true)
+        assertEquals(2, inactiveButMarkedOpen.sortTier)
+    }
+
+    @Test
     fun hotelComparator_handlesNullIsFeaturedProperly() {
         val list = listOf(
             Vendor(id = "1", name = "B", isActive = false, isFeatured = null),

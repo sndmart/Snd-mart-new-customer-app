@@ -1,5 +1,6 @@
 package com.example.data.model
 
+import com.example.util.isVendorWithinOperatingHours
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
@@ -62,12 +63,33 @@ data class Vendor(
     val imageUrl: String? get() = bannerUrl
 }
 
+/**
+ * Whether this hotel is actually open for orders right now: enabled by the vendor
+ * (isOpen), not administratively disabled (isActive), and within its stated operating
+ * hours. This is the "open" signal used for the 4-section hotel listing order below —
+ * it previously used `isActive` alone, which only reflects whether the vendor account is
+ * enabled, not whether the hotel is currently open.
+ */
+val Vendor.isOpenNow: Boolean
+    get() = isOpen && isActive && isVendorWithinOperatingHours(openingTime, closingTime)
+
+/**
+ * Hotel listing order (task: 4 sections in this exact order):
+ * 1. Featured Hotels – Open Now
+ * 2. Open Hotels
+ * 3. Featured Hotels – Closed
+ * 4. Closed Hotels
+ */
 val Vendor.sortTier: Int
-    get() = when {
-        isActive && isFeatured == true -> 0
-        isActive -> 1
-        isFeatured == true -> 2
-        else -> 3
+    get() {
+        val open = isOpenNow
+        val featured = isFeatured == true
+        return when {
+            featured && open -> 0
+            !featured && open -> 1
+            featured && !open -> 2
+            else -> 3
+        }
     }
 
 val HotelComparator: Comparator<Vendor> = compareBy<Vendor> { it.sortTier }
