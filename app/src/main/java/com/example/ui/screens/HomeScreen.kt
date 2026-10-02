@@ -52,6 +52,8 @@ import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.util.isVendorWithinOperatingHours
 import com.example.util.isWithinAnySlot
+import com.example.util.pickRotatingFoodCategories
+import com.example.util.vendorIdsForCategoryName
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -115,6 +117,11 @@ fun HomeScreen(
     var isLoadingMoreHotels by remember { mutableStateOf(false) }
     var hasMoreHotels by remember { mutableStateOf(true) }
     var hotelsError by remember { mutableStateOf<String?>(null) }
+
+    // "What's on your mind?" rotating category picker (Food Delivery hotel listing only).
+    var hotelCategoriesPool by remember { mutableStateOf<List<Category>>(emptyList()) }
+    var displayedFoodCategories by remember { mutableStateOf<List<Category>>(emptyList()) }
+    var selectedFoodCategoryName by remember { mutableStateOf<String?>(null) }
 
     // Tracking state to prevent duplicate/redundant fetches for same city + category
     var lastLoadedCityId by remember { mutableStateOf<String?>(null) }
@@ -193,6 +200,28 @@ fun HomeScreen(
             freeDeliveryThreshold = repository.getFreeDeliveryThreshold(cid)
         } else {
             freeDeliveryThreshold = null
+        }
+    }
+
+    // Hotel menu categories available in this city, for the "What's on your mind?" picker.
+    LaunchedEffect(selectedCity?.id) {
+        val cid = selectedCity?.id
+        hotelCategoriesPool = if (cid != null) {
+            repository.getHotelCategoriesForCity(cid).getOrNull() ?: emptyList()
+        } else {
+            emptyList()
+        }
+    }
+
+    // Rotates the displayed category tiles every 5 minutes, picking only from currently-open
+    // hotels. Re-keyed on `hotels.isNotEmpty()` (not `hotels` itself) so the first load
+    // triggers an immediate recompute once hotels are available, but later pagination
+    // ("Load More Hotels") doesn't reset the 5-minute timer.
+    LaunchedEffect(hotelCategoriesPool, hotels.isNotEmpty()) {
+        while (true) {
+            val openVendorIds = hotels.filter { it.isOpenNow }.map { it.id }.toSet()
+            displayedFoodCategories = pickRotatingFoodCategories(hotelCategoriesPool, openVendorIds)
+            delay(5 * 60 * 1000L)
         }
     }
 
@@ -929,8 +958,12 @@ fun HomeScreen(
                         )
                     }
                 } else {
-                    // Search is performed server-side (name=ilike); just render the results.
-                    val filteredHotels = hotels
+                    // Search is performed server-side (name=ilike); tapping a "What's on your
+                    // mind?" category tile filters client-side by that category's hotels instead.
+                    val filteredHotels = selectedFoodCategoryName?.let { name ->
+                        val matchingVendorIds = vendorIdsForCategoryName(hotelCategoriesPool, name)
+                        hotels.filter { it.id in matchingVendorIds }
+                    } ?: hotels
 
                     if (filteredHotels.isEmpty()) {
                         Box(
@@ -952,6 +985,19 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
+                            if (searchQuery.isBlank() && displayedFoodCategories.isNotEmpty()) {
+                                item {
+                                    FoodCategoryGrid(
+                                        categories = displayedFoodCategories,
+                                        selectedCategoryName = selectedFoodCategoryName,
+                                        onCategoryClick = { name ->
+                                            selectedFoodCategoryName =
+                                                if (selectedFoodCategoryName == name) null else name
+                                        }
+                                    )
+                                }
+                            }
+
                             freeDeliveryThreshold?.let { threshold ->
                                 item {
                                     FreeDeliveryBanner(threshold = threshold)
@@ -1402,6 +1448,88 @@ fun GroceryVariantPickerSheet(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun FoodCategoryGrid(
+    categories: List<Category>,
+    selectedCategoryName: String?,
+    onCategoryClick: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "What's on your mind?",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        val rows = categories.chunked(4)
+        rows.forEachIndexed { index, rowCategories ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                rowCategories.forEach { category ->
+                    FoodCategoryTile(
+                        category = category,
+                        isSelected = selectedCategoryName?.equals(category.name, ignoreCase = true) == true,
+                        onClick = { onCategoryClick(category.name) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                // Keep the last (possibly partial) row left-aligned instead of stretched.
+                repeat(4 - rowCategories.size) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+            if (index != rows.lastIndex) {
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun FoodCategoryTile(
+    category: Category,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .testTag("food_category_${category.id}")
+            .padding(vertical = 2.dp)
+    ) {
+        Surface(
+            shape = CircleShape,
+            modifier = Modifier.size(60.dp),
+            color = if (isSelected) PastelSage else MaterialTheme.colorScheme.surfaceVariant,
+            border = if (isSelected) BorderStroke(2.5.dp, NaturalPrimary)
+            else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        ) {
+            ProductImage(
+                url = category.imageUrl,
+                contentDescription = category.name,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = category.name,
+            fontSize = 11.sp,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+            color = if (isSelected) NaturalPrimary else TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 

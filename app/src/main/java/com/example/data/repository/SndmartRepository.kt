@@ -86,6 +86,7 @@ class SndmartRepository(
     private val cachedProfiles = java.util.concurrent.ConcurrentHashMap<String, Profile>()
     private val cachedVendorNames = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val cachedHotelsByCity = java.util.concurrent.ConcurrentHashMap<String, List<Vendor>>()
+    private val cachedHotelCategoriesByCity = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<Category>>()
 
     // Smart in-memory caches for products, hotels, and hotel menus
     private val groceryProductsCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry<ResolvedProduct>>()
@@ -722,6 +723,41 @@ class SndmartRepository(
 
     // Overload for backward compatibility with existing callers passing cityId
     suspend fun getGroceryCategories(cityId: String): Result<List<Category>> = getGroceryCategories()
+
+    // Hotel menu categories across all hotels in a city (vendor_type=hotel, each row's
+    // vendor_id identifies which hotel it belongs to). Used for the "What's on your mind?"
+    // rotating category picker on the Food Delivery hotel listing — no new backend needed,
+    // this is the same categories table/endpoint getGroceryCategories already queries.
+    suspend fun getHotelCategoriesForCity(cityId: String, forceRefresh: Boolean = false): Result<List<Category>> {
+        if (!SupabaseClient.isKeyConfigured()) {
+            return Result.success(emptyList())
+        }
+        val cached = cachedHotelCategoriesByCity[cityId]
+        if (!forceRefresh && cached != null && !cached.isExpired()) {
+            return Result.success(cached.data)
+        }
+        return try {
+            val response = api.getCategories(
+                select = "id,name,image_url,sort_order,vendor_id,vendor_type,city_id,is_active",
+                isActive = "eq.true",
+                order = "sort_order.asc",
+                vendorType = "eq.hotel",
+                cityId = "eq.$cityId"
+            )
+            if (response.isSuccessful && response.body() != null) {
+                val list = response.body()!!
+                cachedHotelCategoriesByCity[cityId] = CacheEntry(data = list)
+                Result.success(list)
+            } else {
+                val error = SupabaseClient.parseErrorMessage(response)
+                Log.w(TAG, "getHotelCategoriesForCity error: $error")
+                Result.failure(ApiException(response.code(), error))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception fetching hotel categories: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
 
     // --- VENDORS (HOTELS) ---
     // Fetches hotels (vendor_type=hotel) for a city.
