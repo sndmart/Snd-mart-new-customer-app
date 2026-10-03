@@ -728,6 +728,11 @@ class SndmartRepository(
     // vendor_id identifies which hotel it belongs to). Used for the "What's on your mind?"
     // rotating category picker on the Food Delivery hotel listing — no new backend needed,
     // this is the same categories table/endpoint getGroceryCategories already queries.
+    //
+    // Category rows don't carry their own city_id (it's always null — a category belongs to a
+    // vendor, and the vendor has the city), so this can't filter categories by city_id directly.
+    // Instead it first resolves which hotel vendor ids are in this city, then fetches categories
+    // for those vendor ids.
     suspend fun getHotelCategoriesForCity(cityId: String, forceRefresh: Boolean = false): Result<List<Category>> {
         if (!SupabaseClient.isKeyConfigured()) {
             return Result.success(emptyList())
@@ -737,12 +742,29 @@ class SndmartRepository(
             return Result.success(cached.data)
         }
         return try {
+            val vendorsResponse = api.getVendors(
+                cityId = "eq.$cityId",
+                vendorType = "eq.hotel",
+                select = "id",
+                limit = 500
+            )
+            if (!vendorsResponse.isSuccessful || vendorsResponse.body() == null) {
+                val error = SupabaseClient.parseErrorMessage(vendorsResponse)
+                Log.w(TAG, "getHotelCategoriesForCity (vendors) error: $error")
+                return Result.failure(ApiException(vendorsResponse.code(), error))
+            }
+            val vendorIds = vendorsResponse.body()!!.map { it.id }.filter { it.isNotBlank() }
+            if (vendorIds.isEmpty()) {
+                cachedHotelCategoriesByCity[cityId] = CacheEntry(data = emptyList())
+                return Result.success(emptyList())
+            }
+
             val response = api.getCategories(
                 select = "id,name,image_url,sort_order,vendor_id,vendor_type,city_id,is_active",
                 isActive = "eq.true",
                 order = "sort_order.asc",
                 vendorType = "eq.hotel",
-                cityId = "eq.$cityId"
+                vendorId = "in.(${vendorIds.joinToString(",")})"
             )
             if (response.isSuccessful && response.body() != null) {
                 val list = response.body()!!
