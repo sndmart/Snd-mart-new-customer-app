@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -32,15 +33,22 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.model.*
 import com.example.data.repository.AddToCartResult
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.*
 import com.example.ui.theme.*
+import com.example.util.CategoryTabState
 import com.example.util.isVendorWithinOperatingHours
 import com.example.util.isWithinAnySlot
+import com.example.util.orderHotelCategoryTabs
+import com.example.util.pickDefaultHotelCategoryId
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private fun getHotelMenuItemTier(prod: ResolvedProduct, isHotelActive: Boolean, vendorSlots: List<OperatingSlot> = emptyList()): Int {
@@ -88,17 +96,17 @@ fun HotelMenuScreen(
     var categories by remember(vendorId) {
         mutableStateOf(repository.getCachedHotelCategories(vendorId) ?: emptyList())
     }
-    var categoryProducts by remember(vendorId) { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
+    var allProducts by remember(vendorId) { mutableStateOf<List<ResolvedProduct>>(emptyList()) }
     var selectedCategoryId by remember(vendorId) {
         mutableStateOf(categories.firstOrNull()?.id)
     }
-    var lastLoadedCategoryId by remember(vendorId) { mutableStateOf<String?>(null) }
+    var hasUserSelectedCategory by remember(vendorId) { mutableStateOf(false) }
+    var timeTick by remember { mutableStateOf(0L) }
     var isLoadingCategories by remember { mutableStateOf(categories.isEmpty()) }
     var isLoadingProducts by remember { mutableStateOf(false) }
-    var isLoadingMoreProducts by remember { mutableStateOf(false) }
-    var hasMoreProducts by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val menuListState = rememberLazyListState()
+    val tabListState = rememberLazyListState()
 
     val hotelCart by repository.hotelCart.collectAsState()
     var pendingConflict by remember { mutableStateOf<AddToCartResult.HotelConflict?>(null) }
@@ -120,13 +128,13 @@ fun HotelMenuScreen(
         }
     }
 
-    val thisHotelTotalPrice = remember(thisHotelCartItems, freshHotelCartItems, categoryProducts) {
+    val thisHotelTotalPrice = remember(thisHotelCartItems, freshHotelCartItems, allProducts) {
         val freshForThis = freshHotelCartItems.filter { it.cartItem.vendorId == vendorId || it.cartItem.vendorId.isNullOrBlank() }
         if (freshForThis.isNotEmpty()) {
             freshForThis.sumOf { it.totalPrice }
         } else {
             thisHotelCartItems.sumOf { item ->
-                val prod = categoryProducts.find { it.id == item.productId }
+                val prod = allProducts.find { it.id == item.productId }
                 (prod?.effectivePrice ?: 0.0) * item.quantity
             }
         }
@@ -136,19 +144,35 @@ fun HotelMenuScreen(
         onBack()
     }
 
+    // Option A: fetch ALL of this hotel's menu products once (not paginated per category), so
+    // category switching is instant and every tab's "available now" status can be computed
+    // upfront (tabs and items share isHotelItemAvailable, so they never disagree).
     fun loadInitialData(forceRefresh: Boolean = false) {
-        if (!forceRefresh && categories.isNotEmpty() && vendor != null) {
+        if (!forceRefresh && categories.isNotEmpty() && vendor != null && allProducts.isNotEmpty()) {
             return
         }
         coroutineScope.launch {
             if (categories.isEmpty()) {
                 isLoadingCategories = true
             }
+            if (allProducts.isEmpty()) {
+                isLoadingProducts = true
+            }
             errorMessage = null
             coroutineScope {
                 val vDeferred = async { repository.getVendor(vendorId) }
                 val sDeferred = async { repository.getVendorOperatingSlots(vendorId) }
                 val cDeferred = async { repository.getHotelCategories(vendorId, forceRefresh = forceRefresh) }
+                val pDeferred = async {
+                    repository.getHotelProducts(
+                        vendorId = vendorId,
+                        cityId = cityId,
+                        categoryId = null,
+                        limit = 500,
+                        offset = 0,
+                        forceRefresh = forceRefresh
+                    )
+                }
 
                 val vRes = vDeferred.await()
                 if (vRes.isSuccess) {
@@ -162,74 +186,20 @@ fun HotelMenuScreen(
 
                 val cRes = cDeferred.await()
                 if (cRes.isSuccess) {
-                    val cats = cRes.getOrNull() ?: emptyList()
-                    categories = cats
-                    if (cats.isNotEmpty() && (selectedCategoryId == null || cats.none { it.id == selectedCategoryId })) {
-                        selectedCategoryId = cats.first().id
-                    }
+                    categories = cRes.getOrNull() ?: emptyList()
                 } else {
                     errorMessage = cRes.exceptionOrNull()?.message
                 }
+
+                val pRes = pDeferred.await()
+                if (pRes.isSuccess) {
+                    allProducts = pRes.getOrNull() ?: emptyList()
+                } else if (errorMessage == null) {
+                    errorMessage = pRes.exceptionOrNull()?.message
+                }
             }
             isLoadingCategories = false
-        }
-    }
-
-    // Rule 4: Paginate hotel menu items by 20-30 at a time (default 25)
-    // Rule 3: Prevent redundant re-fetching when already loaded
-    fun loadProductsForCategory(catId: String?, reset: Boolean = true, forceRefresh: Boolean = false) {
-        if (catId == null) return
-
-        // Prevent redundant re-fetch if already loaded
-        if (reset && !forceRefresh && catId == lastLoadedCategoryId && categoryProducts.isNotEmpty()) {
-            return
-        }
-
-        // Check in-memory cache first for instant category switching
-        if (reset && !forceRefresh) {
-            val cached = repository.getCachedHotelProducts(vendorId, cityId, catId)
-            if (cached != null && cached.isNotEmpty()) {
-                categoryProducts = cached
-                lastLoadedCategoryId = catId
-                isLoadingProducts = false
-                hasMoreProducts = cached.size >= 25
-                return
-            }
-        }
-
-        coroutineScope.launch {
-            if (reset) {
-                isLoadingProducts = true
-                errorMessage = null
-            } else {
-                isLoadingMoreProducts = true
-            }
-
-            val offset = if (reset) 0 else categoryProducts.size
-            val res = repository.getHotelProducts(
-                vendorId = vendorId,
-                cityId = cityId,
-                categoryId = catId,
-                limit = 25,
-                offset = offset,
-                forceRefresh = forceRefresh
-            )
-            if (res.isSuccess) {
-                val newItems = res.getOrNull() ?: emptyList()
-                if (reset) {
-                    categoryProducts = newItems
-                    lastLoadedCategoryId = catId
-                } else {
-                    categoryProducts = (categoryProducts + newItems).distinctBy { it.id }
-                }
-                hasMoreProducts = newItems.size >= 25
-            } else {
-                if (reset) {
-                    errorMessage = res.exceptionOrNull()?.message
-                }
-            }
             isLoadingProducts = false
-            isLoadingMoreProducts = false
         }
     }
 
@@ -237,25 +207,56 @@ fun HotelMenuScreen(
         loadInitialData()
     }
 
+    // Recalculate category availability/order once a minute, and immediately on resume.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            timeTick = System.currentTimeMillis()
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                timeTick = System.currentTimeMillis()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val isHotelActive = vendor?.isActive ?: true
+    val isWithinHours = isWithinAnySlot(effectiveSlots)
+    val isHotelOpen = isHotelActive && isWithinHours
+
+    // Category tab ordering/availability (spec rules 1-2): recomputed whenever the underlying
+    // data, hotel-open state, or timeTick (minute tick / resume) changes.
+    val orderedTabs = remember(categories, allProducts, effectiveSlots, isHotelOpen, timeTick) {
+        orderHotelCategoryTabs(categories, allProducts, effectiveSlots, isHotelOpen)
+    }
+
+    // Default-selection (spec rule 3): only while the customer hasn't tapped a tab themselves.
+    LaunchedEffect(orderedTabs, vendor?.defaultCategoryId) {
+        if (!hasUserSelectedCategory) {
+            val defaultId = pickDefaultHotelCategoryId(orderedTabs, vendor?.defaultCategoryId, isHotelOpen)
+            if (defaultId != null) {
+                selectedCategoryId = defaultId
+            }
+        }
+    }
+
+    // Auto-scroll the tab row so the selected tab is fully visible, and the item list to the top.
+    LaunchedEffect(selectedCategoryId, orderedTabs) {
+        val idx = orderedTabs.indexOfFirst { it.category.id == selectedCategoryId }
+        if (idx >= 0) {
+            tabListState.animateScrollToItem(idx)
+        }
+    }
+
     LaunchedEffect(selectedCategoryId) {
-        if (selectedCategoryId != null) {
-            loadProductsForCategory(selectedCategoryId, reset = true)
-        }
-    }
-
-    // Auto-paginate on scroll near bottom
-    val shouldLoadMore by remember {
-        derivedStateOf {
-            val layoutInfo = menuListState.layoutInfo
-            val totalItems = layoutInfo.totalItemsCount
-            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            totalItems > 0 && lastVisible >= totalItems - 3
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore && hasMoreProducts && !isLoadingMoreProducts && !isLoadingProducts) {
-            loadProductsForCategory(selectedCategoryId, reset = false)
+        if (menuListState.layoutInfo.totalItemsCount > 0) {
+            menuListState.animateScrollToItem(0)
         }
     }
 
@@ -322,7 +323,6 @@ fun HotelMenuScreen(
                     IconButton(
                         onClick = {
                             loadInitialData(forceRefresh = true)
-                            loadProductsForCategory(selectedCategoryId, reset = true, forceRefresh = true)
                         },
                         modifier = Modifier.testTag("hotel_menu_refresh_button")
                     ) {
@@ -368,32 +368,29 @@ fun HotelMenuScreen(
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            if ((isLoadingCategories || isLoadingProducts) && categoryProducts.isEmpty()) {
+            if ((isLoadingCategories || isLoadingProducts) && allProducts.isEmpty()) {
                 // Rule 7: Skeleton loading state instead of a spinner
                 OrderListSkeleton(count = 5)
-            } else if (errorMessage != null && categoryProducts.isEmpty()) {
+            } else if (errorMessage != null && allProducts.isEmpty()) {
                 ErrorCard(
                     message = errorMessage!!,
                     onRetry = {
                         loadInitialData(forceRefresh = true)
-                        loadProductsForCategory(selectedCategoryId, reset = true, forceRefresh = true)
                     },
                     modifier = Modifier.align(Alignment.Center)
                 )
             } else {
-                val isHotelActive = vendor?.isActive ?: true
-                val isWithinHours = isWithinAnySlot(effectiveSlots)
-                val isHotelOpen = isHotelActive && isWithinHours
-
                 // Filter items reacting to the selected category (Swiggy-style)
                 // The item grid should always be filtered to whichever category is currently selected - never show all of this hotel's items unfiltered.
                 // Preserving existing sort logic: available+featured first, unavailable last
-                val displayedProducts = remember(categoryProducts, isHotelOpen, effectiveSlots) {
-                    categoryProducts.sortedWith(
-                        compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelOpen, effectiveSlots) }
-                            .thenByDescending { it.isFeatured }
-                            .thenBy { it.name.lowercase() }
-                    )
+                val displayedProducts = remember(allProducts, selectedCategoryId, isHotelOpen, effectiveSlots) {
+                    allProducts
+                        .filter { it.categoryId == selectedCategoryId }
+                        .sortedWith(
+                            compareBy<ResolvedProduct> { getHotelMenuItemTier(it, isHotelOpen, effectiveSlots) }
+                                .thenByDescending { it.isFeatured }
+                                .thenBy { it.name.lowercase() }
+                        )
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -440,9 +437,13 @@ fun HotelMenuScreen(
                     // 1 & 4: Horizontal category row (fixed at top, does not scroll away)
                     if (categories.isNotEmpty()) {
                         HotelCategoryTabsRow(
-                            categories = categories,
+                            tabs = orderedTabs,
                             selectedCategoryId = selectedCategoryId,
-                            onCategorySelected = { selectedCategoryId = it },
+                            onCategorySelected = {
+                                selectedCategoryId = it
+                                hasUserSelectedCategory = true
+                            },
+                            listState = tabListState,
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -533,35 +534,6 @@ fun HotelMenuScreen(
                                     }
                                 )
                             }
-
-                            if (hasMoreProducts) {
-                                item(key = "hotel_menu_load_more") {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 12.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isLoadingMoreProducts) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(28.dp),
-                                                strokeWidth = 2.5.dp,
-                                                color = NaturalPrimary
-                                            )
-                                        } else {
-                                            OutlinedButton(
-                                                onClick = {
-                                                    loadProductsForCategory(selectedCategoryId, reset = false)
-                                                },
-                                                shape = RoundedCornerShape(20.dp),
-                                                border = BorderStroke(1.dp, NaturalPrimary.copy(alpha = 0.5f))
-                                            ) {
-                                                Text("Load more items", color = NaturalPrimary, style = MaterialTheme.typography.labelLarge)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -577,9 +549,10 @@ fun HotelMenuScreen(
  */
 @Composable
 fun HotelCategoryTabsRow(
-    categories: List<Category>,
+    tabs: List<CategoryTabState>,
     selectedCategoryId: String?,
     onCategorySelected: (String) -> Unit,
+    listState: LazyListState,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -588,19 +561,22 @@ fun HotelCategoryTabsRow(
         shadowElevation = 1.dp
     ) {
         LazyRow(
+            state = listState,
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("hotel_category_tabs_row"),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(categories, key = { it.id }) { category ->
+            items(tabs, key = { it.category.id }) { tab ->
                 HotelCategoryCircleTab(
-                    title = category.name,
-                    imageUrl = category.imageUrl,
-                    isSelected = selectedCategoryId == category.id,
-                    onClick = { onCategorySelected(category.id) },
-                    testTag = "hotel_category_tab_${category.id}"
+                    title = tab.category.name,
+                    imageUrl = tab.category.imageUrl,
+                    isSelected = selectedCategoryId == tab.category.id,
+                    isAvailable = tab.isAvailableNow,
+                    hint = tab.availableFromHint,
+                    onClick = { onCategorySelected(tab.category.id) },
+                    testTag = "hotel_category_tab_${tab.category.id}"
                 )
             }
         }
@@ -620,6 +596,8 @@ fun HotelCategoryCircleTab(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     isAllOption: Boolean = false,
+    isAvailable: Boolean = true,
+    hint: String? = null,
     testTag: String = ""
 ) {
     val activeColor = NaturalPrimary
@@ -633,6 +611,7 @@ fun HotelCategoryCircleTab(
             .clickable(onClick = onClick)
             .padding(vertical = 2.dp)
             .widthIn(min = 64.dp, max = 76.dp)
+            .alpha(if (isAvailable) 1f else 0.5f)
     ) {
         Box(
             modifier = Modifier
@@ -687,6 +666,18 @@ fun HotelCategoryCircleTab(
             overflow = TextOverflow.Ellipsis,
             lineHeight = 14.sp
         )
+
+        if (!isAvailable && !hint.isNullOrBlank()) {
+            Text(
+                text = hint,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 9.sp,
+                color = TextMuted,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 

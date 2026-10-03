@@ -1184,7 +1184,7 @@ class SndmartRepository(
                 isActive = "eq.true",
                 vendorId = "eq.$vendorId",
                 categoryId = catQuery,
-                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured",
+                select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,available_from,available_until",
                 order = "is_featured.desc",
                 limit = limit,
                 offset = offset

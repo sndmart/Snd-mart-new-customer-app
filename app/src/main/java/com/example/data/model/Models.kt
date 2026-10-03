@@ -57,7 +57,11 @@ data class Vendor(
     @Json(name = "city_id") val cityId: String? = null,
     @Json(name = "opening_time") val openingTime: String? = null,
     @Json(name = "closing_time") val closingTime: String? = null,
-    @Json(name = "is_featured") val isFeatured: Boolean? = false
+    @Json(name = "is_featured") val isFeatured: Boolean? = false,
+    // City admin-set default category tab for this hotel's menu (e.g. "Tiffins"), used to
+    // pick which tab is selected when the menu opens. Null if unset, or if the backend
+    // doesn't have this column yet — callers fall back to the first available-now category.
+    @Json(name = "default_category_id") val defaultCategoryId: String? = null
 ) {
     // Compatibility alias: wherever imageUrl is referenced for a vendor/hotel, resolve to bannerUrl
     val imageUrl: String? get() = bannerUrl
