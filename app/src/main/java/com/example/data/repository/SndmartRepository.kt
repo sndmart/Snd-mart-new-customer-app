@@ -939,7 +939,7 @@ class SndmartRepository(
         return try {
             val response = api.getVendorById(
                 idQuery = "eq.$vendorId",
-                select = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time"
+                select = "id,name,banner_url,is_active,is_featured,is_open,address,latitude,longitude,opening_time,closing_time,default_category_id"
             )
             Result.success(response.body()?.firstOrNull())
         } catch (e: Exception) {
