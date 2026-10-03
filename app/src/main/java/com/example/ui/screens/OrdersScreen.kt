@@ -1,5 +1,12 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -14,10 +21,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.model.Order
 import com.example.data.repository.SndmartRepository
 import com.example.data.session.UserSessionManager
@@ -90,6 +102,26 @@ fun OrdersScreen(
         loadOrders(reset = true)
     }
 
+    // Notifications permission banner: re-checked on resume so it disappears right after the
+    // customer grants it from Settings and comes back, with no extra tap needed.
+    val context = LocalContext.current
+    var permissionRecheckTrigger by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionRecheckTrigger++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val notificationsDenied = remember(permissionRecheckTrigger) {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -105,11 +137,30 @@ fun OrdersScreen(
             )
         }
     ) { paddingValues ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.background)
+        ) {
+            if (isLoggedIn && notificationsDenied) {
+                EnableNotificationsBanner(
+                    onOpenSettings = {
+                        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        } else {
+                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData(Uri.fromParts("package", context.packageName, null))
+                        }
+                        context.startActivity(intent)
+                    }
+                )
+            }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
         ) {
             if (!isLoggedIn) {
                 Box(
@@ -226,6 +277,53 @@ fun OrdersScreen(
                         }
                     }
                 }
+            }
+        }
+        }
+    }
+}
+
+@Composable
+fun EnableNotificationsBanner(onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("enable_notifications_banner"),
+        shape = RoundedCornerShape(12.dp),
+        color = PastelSky,
+        border = BorderStroke(1.dp, NaturalOceanBlue.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.NotificationsNone,
+                contentDescription = null,
+                tint = NaturalOceanBlue,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Turn on notifications",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Get live order status updates",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("enable_notifications_button")
+            ) {
+                Text("Enable", fontWeight = FontWeight.Bold, color = NaturalOceanBlue)
             }
         }
     }

@@ -426,6 +426,14 @@ interface SupabaseApi {
         @Query("on_conflict") onConflict: String = "user_id,user_type"
     ): Response<ResponseBody>
 
+    @Headers("Prefer: return=minimal")
+    @PATCH("rest/v1/device_tokens")
+    suspend fun deactivateDeviceToken(
+        @Query("user_id") userIdQuery: String,
+        @Query("user_type") userType: String = "eq.customer",
+        @Body body: Map<String, Boolean> = mapOf("active" to false)
+    ): Response<ResponseBody>
+
     // --- NOTIFICATIONS ---
 
     @GET("rest/v1/notifications")

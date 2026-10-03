@@ -25,21 +25,6 @@ data class InAppNotification(
     val orderId: String?
 )
 
-/**
- * Top-level helper function for registering the customer FCM token to Supabase `device_tokens`.
- * Uses firebase_project = "native" and onConflict = "user_id,user_type".
- */
-suspend fun registerCustomerFcmToken(token: String): Result<Unit> {
-    val app = SndmartApp.instance
-    val userId = app.sessionManager.userId.value ?: app.sessionManager.getUserId()
-    if (userId.isNullOrBlank()) {
-        Log.d("CustomerFcmService", "No active user session; skipping FCM registration until login.")
-        return Result.failure(IllegalStateException("No current user logged in"))
-    }
-    val repo = SndmartRepository(sessionManager = app.sessionManager)
-    return repo.registerCustomerFcmToken(token)
-}
-
 open class CustomerFcmService : FirebaseMessagingService() {
 
     private fun extractOrderId(message: RemoteMessage): String? {
@@ -141,9 +126,20 @@ open class CustomerFcmService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         Log.d(TAG, "Customer FCM onNewToken received")
+        val app = SndmartApp.instance
+        // Always stash it: even if we're logged in and register it below right away, this also
+        // covers the case where registration fails and a later ensurePushTokenRegistered() call
+        // (app resume, etc.) needs to know the token changed and must re-register, not dedupe.
+        PushTokenManager.stashPendingToken(app, token)
+        val userId = app.sessionManager.userId.value ?: app.sessionManager.getUserId()
+        if (userId.isNullOrBlank()) {
+            Log.d(TAG, "No active session yet; new token stashed, will register after login")
+            return
+        }
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                registerCustomerFcmToken(token)
+                val repo = SndmartRepository(sessionManager = app.sessionManager)
+                PushTokenManager.ensurePushTokenRegistered(app, app.sessionManager, repo)
             } catch (e: Exception) {
                 Log.e(TAG, "Error registering FCM token onNewToken", e)
             }

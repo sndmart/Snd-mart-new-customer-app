@@ -264,7 +264,13 @@ fun ProfileScreen(
                     onClick = {
                         coroutineScope.launch {
                             isLoggingOut = true
+                            val loggingOutUserId = sessionManager.userId.value ?: sessionManager.getUserId()
                             withTimeoutOrNull(5000) {
+                                // Stop pushes to this device before the session (and its ability
+                                // to authenticate the PATCH) goes away.
+                                if (!loggingOutUserId.isNullOrBlank()) {
+                                    repository.deactivateDeviceToken(loggingOutUserId)
+                                }
                                 repository.signOut()
                             }
                             repository.resetInMemoryCart()

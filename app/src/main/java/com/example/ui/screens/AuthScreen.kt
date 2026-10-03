@@ -32,10 +32,10 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.Profile
 import com.example.data.repository.SndmartRepository
 import com.example.data.session.UserSessionManager
+import com.example.service.PushTokenManager
 import com.example.ui.components.ErrorCard
 import com.example.ui.theme.*
 import com.example.util.PhoneUtils
-import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -114,27 +114,12 @@ fun AuthScreen(
 
     // Helper: Register FCM Token upon successful authentication
     fun registerFcm(userId: String) {
-        try {
-            val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
-            val playServicesOk = availability.isGooglePlayServicesAvailable(context) ==
-                com.google.android.gms.common.ConnectionResult.SUCCESS
-            if (playServicesOk) {
-                FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                    if (task.isSuccessful && task.result != null) {
-                        val token = task.result
-                        Log.d("AuthScreen", "Retrieved FCM token on login successfully")
-                        coroutineScope.launch {
-                            try {
-                                repository.registerCustomerFcmToken(token)
-                            } catch (e: Exception) {
-                                Log.w("AuthScreen", "Failed to register FCM token: ${e.message}")
-                            }
-                        }
-                    }
-                }
+        coroutineScope.launch {
+            try {
+                PushTokenManager.ensurePushTokenRegistered(context, sessionManager, repository)
+            } catch (e: Exception) {
+                Log.w("AuthScreen", "Failed to register FCM token: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.d("AuthScreen", "FirebaseMessaging token retrieval skipped: ${e.message}")
         }
     }
 

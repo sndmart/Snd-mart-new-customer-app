@@ -2934,10 +2934,30 @@ class SndmartRepository(
             } else {
                 val error = SupabaseClient.parseErrorMessage(response)
                 Log.e(TAG, "Failed to register device token: $error")
-                Result.failure(Exception(error))
+                // Carries the HTTP code (ApiException.code) so callers like PushTokenManager can
+                // special-case 401 (expired session) without parsing the error text.
+                Result.failure(ApiException(response.code(), error))
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception registering device token", e)
+            Result.failure(e)
+        }
+    }
+
+    /** Marks this customer's device_tokens row inactive so no more pushes go to it. Call this
+     * BEFORE clearing the session on logout - it needs the user id to target the row. */
+    suspend fun deactivateDeviceToken(userId: String): Result<Unit> {
+        if (userId.isBlank()) return Result.success(Unit)
+        return try {
+            val response = api.deactivateDeviceToken(userIdQuery = "eq.$userId")
+            if (response.isSuccessful) {
+                Result.success(Unit)
+            } else {
+                Result.failure(ApiException(response.code(), SupabaseClient.parseErrorMessage(response)))
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "Exception deactivating device token: ${e.message}")
             Result.failure(e)
         }
     }

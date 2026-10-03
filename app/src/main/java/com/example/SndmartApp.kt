@@ -70,9 +70,10 @@ class SndmartApp : Application(), ImageLoaderFactory {
 
     private fun initFirebaseSafety() {
         try {
-            // Keep FCM auto-init disabled by default so the background SyncTask does not run
-            // on startup in environments without active FCM registration or Play account.
-            com.google.firebase.messaging.FirebaseMessaging.getInstance().isAutoInitEnabled = false
+            // Auto-init must stay enabled - this is what makes FCM actually generate/refresh a
+            // token and deliver it to CustomerFcmService.onNewToken. Disabling it was silently
+            // starving device_tokens of almost every new install/login (see PushTokenManager).
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().isAutoInitEnabled = true
         } catch (e: Throwable) {
             // FirebaseApp or Play Services not present/initialized
         }

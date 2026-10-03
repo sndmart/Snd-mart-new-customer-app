@@ -37,6 +37,7 @@ import com.example.data.model.*
 import com.example.data.repository.SndmartRepository
 import com.example.service.CustomerFcmService
 import com.example.service.InAppNotification
+import com.example.service.PushTokenManager
 import com.example.service.SndmartMessagingService
 import com.example.ui.components.InAppNotificationBanner
 import com.example.ui.components.LocationDetectionState
@@ -318,12 +319,17 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                     }
                 }
 
-                // Android 13+ Notification Permission Prompt
+                // Android 13+ Notification Permission Prompt - asked only after login (not on
+                // the very first screen), since it means nothing to a customer who hasn't signed
+                // in yet and a denial here shouldn't block anything: the token still gets
+                // registered either way (data pushes still work, and a later permission grant
+                // just starts showing them).
                 val notificationPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
-                ) { /* Permission response handled by system */ }
+                ) { /* Permission response handled by system; registration doesn't depend on it */ }
 
-                LaunchedEffect(Unit) {
+                LaunchedEffect(userId) {
+                    val currentUserId = userId ?: return@LaunchedEffect
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         if (ContextCompat.checkSelfPermission(
                                 this@MainActivity,
@@ -333,33 +339,7 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
                     }
-                }
-
-                // On login and every app start while logged in: upsert the FCM token so the
-                // backend can push order status updates to this device (on_conflict keeps
-                // the row unique per user: user_id,user_type).
-                LaunchedEffect(userId) {
-                    val currentUserId = userId ?: return@LaunchedEffect
-                    try {
-                        val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
-                        val playServicesOk = availability.isGooglePlayServicesAvailable(this@MainActivity) ==
-                            com.google.android.gms.common.ConnectionResult.SUCCESS
-                        if (playServicesOk) {
-                            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                                .addOnCompleteListener { task ->
-                                    if (task.isSuccessful && task.result != null) {
-                                        val token = task.result
-                                        coroutineScope.launch {
-                                            repository.registerCustomerFcmToken(token)
-                                        }
-                                    } else {
-                                        android.util.Log.d("MainActivity", "FCM token not available: ${task.exception?.message}")
-                                    }
-                                }
-                        }
-                    } catch (e: Throwable) {
-                        // Firebase/Play Services not available; skip silently
-                    }
+                    PushTokenManager.ensurePushTokenRegistered(this@MainActivity, sessionManager, repository)
                     // Fetch latest unread notifications count
                     repository.refreshUnreadNotificationCount(currentUserId)
                 }
@@ -382,6 +362,9 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                                             repository.syncRazorpayPayment(pOrderId)
                                         }
                                     }
+                                }
+                                coroutineScope.launch {
+                                    PushTokenManager.ensurePushTokenRegistered(this@MainActivity, sessionManager, repository)
                                 }
                             }
                             coroutineScope.launch {
