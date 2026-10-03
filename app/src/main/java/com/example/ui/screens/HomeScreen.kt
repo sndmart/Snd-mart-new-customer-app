@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
@@ -998,6 +999,15 @@ fun HomeScreen(
                                 }
                             }
 
+                            selectedFoodCategoryName?.let { name ->
+                                item(key = "active_food_category_filter") {
+                                    ActiveCategoryFilterChip(
+                                        categoryName = name,
+                                        onClear = { selectedFoodCategoryName = null }
+                                    )
+                                }
+                            }
+
                             freeDeliveryThreshold?.let { threshold ->
                                 item {
                                     FreeDeliveryBanner(threshold = threshold)
@@ -1741,33 +1751,132 @@ fun HotelCard(
     }
 }
 
+/**
+ * Shown above the hotel list whenever a "What's on your mind?" category tile is active, so the
+ * customer always has a visible, one-tap way to see what's filtering the list and clear it —
+ * instead of only the (easy to scroll past) highlighted tile in the grid above.
+ */
 @Composable
-fun FreeDeliveryBanner(threshold: Double, modifier: Modifier = Modifier) {
+fun ActiveCategoryFilterChip(
+    categoryName: String,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .testTag("free_delivery_banner"),
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFFFFF3E0), // warm amber background, Swiggy-style
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag("active_food_category_filter_chip"),
+        shape = RoundedCornerShape(10.dp),
+        color = NaturalPrimaryContainer
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.FilterAlt,
+                    contentDescription = null,
+                    tint = NaturalPrimaryDark,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Showing: $categoryName",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    color = NaturalPrimaryDark
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onClear)
+                    .testTag("clear_food_category_filter_button")
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Clear",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = NaturalPrimaryDark
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Clear filter",
+                    tint = NaturalPrimaryDark,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun FreeDeliveryBanner(threshold: Double, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .testTag("free_delivery_banner")
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(Color(0xFFFF9800), Color(0xFFFF5722))
+                )
+            )
+    ) {
+        // Decorative translucent circle, Swiggy-style banner touch.
+        Box(
+            modifier = Modifier
+                .size(90.dp)
+                .align(Alignment.CenterEnd)
+                .offset(x = 24.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.10f))
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                Icons.Default.LocalShipping,
-                contentDescription = null,
-                tint = Color(0xFFEF6C00),
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "FREE Delivery on orders above Rs ${threshold.toInt()}!",
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                color = Color(0xFFEF6C00)
-            )
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.22f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.LocalShipping,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column {
+                Text(
+                    text = "FREE DELIVERY",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 15.sp,
+                    color = Color.White
+                )
+                Text(
+                    text = "On orders above ₹${threshold.toInt()}",
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp,
+                    color = Color.White.copy(alpha = 0.92f)
+                )
+            }
         }
     }
 }
