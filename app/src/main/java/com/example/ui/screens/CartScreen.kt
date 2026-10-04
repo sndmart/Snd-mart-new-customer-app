@@ -15,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -22,6 +23,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.data.model.CART_HOTEL_CLOSED_MESSAGE
+import com.example.data.model.CartAvailabilityState
 import com.example.data.model.CartItemUi
 import com.example.data.repository.SndmartRepository
 import com.example.ui.components.*
@@ -80,8 +86,29 @@ fun CartScreen(
         fetchFreshCart()
     }
 
-    // Calculate totals from fresh prices
+    // Also re-check availability on resume, so an item turned off/on while the app was
+    // backgrounded is reflected without the customer having to do anything.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                fetchFreshCart()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Calculate totals from fresh prices - unavailable/out-of-stock rows contribute 0
+    // (CartItemUi.totalPrice already excludes them), so this naturally matches rule 2.
     val subtotal = freshItems.sumOf { it.totalPrice }
+    val unavailableItems = freshItems.filter { !it.isPurchasable }
+    val hotelClosedMessage = if (isHotelCartSelected) {
+        freshItems.firstOrNull { it.stateMessage == CART_HOTEL_CLOSED_MESSAGE }?.stateMessage
+    } else null
+    // When the whole hotel is closed every item carries the same sentinel reason - show one
+    // banner instead of labelling each row individually.
+    val perItemUnavailable = if (hotelClosedMessage != null) emptyList() else unavailableItems
 
     Scaffold(
         topBar = {
@@ -94,6 +121,12 @@ fun CartScreen(
                 },
                 actions = {
                     if (freshItems.isNotEmpty()) {
+                        IconButton(
+                            onClick = { fetchFreshCart() },
+                            modifier = Modifier.testTag("refresh_cart_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh Cart")
+                        }
                         IconButton(
                             onClick = {
                                 repository.clearCart(isHotelCartSelected)
@@ -143,17 +176,29 @@ fun CartScreen(
                             }
                             Button(
                                 onClick = {
-                                    onProceedToCheckout(isHotelCartSelected, null)
+                                    if (unavailableItems.isNotEmpty()) {
+                                        repository.removeCartItems(
+                                            unavailableItems.map { it.cartItem.productId to it.cartItem.variantId },
+                                            isHotelCartSelected
+                                        )
+                                    } else {
+                                        onProceedToCheckout(isHotelCartSelected, null)
+                                    }
                                 },
+                                enabled = hotelClosedMessage == null,
                                 modifier = Modifier
                                     .height(48.dp)
                                     .testTag("proceed_to_checkout_button"),
                                 colors = ButtonDefaults.buttonColors(containerColor = NaturalPrimary),
                                 shape = RoundedCornerShape(24.dp)
                             ) {
-                                Text("Proceed to Checkout", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                if (unavailableItems.isNotEmpty()) {
+                                    Text("Remove unavailable items & continue", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                } else {
+                                    Text("Proceed to Checkout", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                }
                             }
                         }
                     }
@@ -330,6 +375,80 @@ fun CartScreen(
                         }
                     }
 
+                    if (hotelClosedMessage != null) {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = NaturalBadgeRed.copy(alpha = 0.12f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("hotel_closed_cart_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = NaturalBadgeRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "This hotel is currently closed. You can't place this order right now.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = NaturalBadgeRed
+                                    )
+                                }
+                            }
+                        }
+                    } else if (perItemUnavailable.isNotEmpty()) {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = NaturalBadgeRed.copy(alpha = 0.12f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("unavailable_items_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = NaturalBadgeRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "${perItemUnavailable.size} item(s) are not available right now",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = NaturalBadgeRed,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            repository.removeCartItems(
+                                                perItemUnavailable.map { it.cartItem.productId to it.cartItem.variantId },
+                                                isHotelCartSelected
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("remove_unavailable_items_button")
+                                    ) {
+                                        Text("Remove unavailable items", color = NaturalBadgeRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Free Delivery Hint: "Add Rs X more for FREE Express Delivery"
                     if (freeDeliveryThreshold != null && freeDeliveryThreshold!! > 0.0) {
                         val threshold = freeDeliveryThreshold!!
@@ -388,6 +507,12 @@ fun CartScreen(
                                     newQty = itemUi.cartItem.quantity - 1,
                                     variantId = itemUi.cartItem.variantId
                                 )
+                            },
+                            onRemove = {
+                                repository.removeCartItems(
+                                    listOf(itemUi.cartItem.productId to itemUi.cartItem.variantId),
+                                    isHotelCartSelected
+                                )
                             }
                         )
                     }
@@ -430,16 +555,29 @@ fun CartScreen(
 fun CartItemRow(
     item: CartItemUi,
     onIncrease: () -> Unit,
-    onDecrease: () -> Unit
+    onDecrease: () -> Unit,
+    onRemove: () -> Unit
 ) {
     val tagSuffix = "${item.cartItem.productId}${item.cartItem.variantId?.let { "_$it" } ?: ""}"
+    val isPurchasable = item.isPurchasable
+    // The hotel-closed sentinel is shown once at the top of the cart, not repeated per row.
+    val rowMessage = item.stateMessage?.takeIf { it != CART_HOTEL_CLOSED_MESSAGE }
+    val messageColor = when (item.availabilityState) {
+        CartAvailabilityState.QTY_REDUCED -> Color(0xFFE65100)
+        else -> NaturalBadgeRed
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (isPurchasable) 1f else 0.6f)
             .testTag("cart_item_$tagSuffix"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (!isPurchasable) NaturalBadgeRed.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(
@@ -470,25 +608,47 @@ fun CartItemRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = "₹${"%.0f".format(item.effectivePrice)}${if (item.variant != null) "" else if (!item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
-                )
-                Text(
-                    text = "Total: ₹${"%.0f".format(item.totalPrice)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Bold,
-                    color = NaturalPrimary
-                )
+                if (isPurchasable) {
+                    Text(
+                        text = "₹${"%.0f".format(item.effectivePrice)}${if (item.variant != null) "" else if (!item.product.unit.isNullOrBlank()) " / ${item.product.unit}" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = "Total: ₹${"%.0f".format(item.totalPrice)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NaturalPrimary
+                    )
+                }
+                if (rowMessage != null) {
+                    Text(
+                        text = rowMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = messageColor
+                    )
+                }
             }
 
-            QuantityStepper(
-                quantity = item.cartItem.quantity,
-                onIncrease = onIncrease,
-                onDecrease = onDecrease,
-                testTagPrefix = "cart_item_$tagSuffix"
-            )
+            if (isPurchasable) {
+                QuantityStepper(
+                    quantity = item.cartItem.quantity,
+                    onIncrease = onIncrease,
+                    onDecrease = onDecrease,
+                    testTagPrefix = "cart_item_$tagSuffix"
+                )
+            } else {
+                OutlinedButton(
+                    onClick = onRemove,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NaturalBadgeRed),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.testTag("remove_cart_item_$tagSuffix")
+                ) {
+                    Text("Remove", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }

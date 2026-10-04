@@ -298,6 +298,40 @@ class UserSessionManager(context: Context) {
         } catch (e: Throwable) {}
     }
 
+    /**
+     * Caches a cart product/variant's last-known name/image/unit, so the cart can still show
+     * what an item was even after it's been turned off and RLS stops returning that row for
+     * this customer's own queries. Call this whenever the product was successfully resolved
+     * (add-to-cart, or a fresh cart fetch) - see CartProductSnapshot.
+     */
+    fun cacheCartProductSnapshot(productId: String, variantId: String?, name: String, imageUrl: String?, unit: String?) {
+        if (productId.isBlank() || name.isBlank()) return
+        val json = JSONObject().apply {
+            put("name", name)
+            put("imageUrl", imageUrl ?: JSONObject.NULL)
+            put("unit", unit ?: JSONObject.NULL)
+        }
+        prefs.edit().putString(cartSnapshotKey(productId, variantId), json.toString()).apply()
+    }
+
+    fun getCachedCartProductSnapshot(productId: String, variantId: String?): com.example.data.model.CartProductSnapshot? {
+        val raw = prefs.getString(cartSnapshotKey(productId, variantId), null) ?: return null
+        return try {
+            val json = JSONObject(raw)
+            val name = json.optString("name")
+            if (name.isBlank()) return null
+            com.example.data.model.CartProductSnapshot(
+                name = name,
+                imageUrl = json.optString("imageUrl").takeIf { it.isNotBlank() },
+                unit = json.optString("unit").takeIf { it.isNotBlank() }
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun cartSnapshotKey(productId: String, variantId: String?) = "cart_snapshot_${productId}_${variantId ?: "base"}"
+
     companion object {
         private const val KEY_ACCESS_TOKEN = "access_token"
         private const val KEY_REFRESH_TOKEN = "refresh_token"

@@ -81,6 +81,10 @@ fun CheckoutScreen(
     var freshItems by remember { mutableStateOf<List<CartItemUi>>(emptyList()) }
     var isLoadingFreshCart by remember { mutableStateOf(true) }
     val subtotal = freshItems.sumOf { it.totalPrice }
+    val unavailableItems = freshItems.filter { !it.isPurchasable }
+    val hotelClosedMessage = if (isHotel) {
+        freshItems.firstOrNull { it.stateMessage == CART_HOTEL_CLOSED_MESSAGE }?.stateMessage
+    } else null
 
     // ONE Delivery System: "Express Delivery" Only
     var calculatedDeliveryFee by remember { mutableStateOf<Double?>(null) }
@@ -377,7 +381,18 @@ fun CheckoutScreen(
             !isDeliveryAvailable ||
             selectedAddressId == null ||
             effectiveCityId == null ||
-            subtotal <= 0.0
+            subtotal <= 0.0 ||
+            hotelClosedMessage != null
+
+    // While unavailable items are in the cart, the button only needs to remove them - skip the
+    // address/delivery-fee/subtotal gating above so the customer can always clear a dead cart
+    // (e.g. every item turned out to be unavailable, which would otherwise make subtotal 0 and
+    // permanently disable the button).
+    val isPlaceOrderButtonDisabled = if (unavailableItems.isNotEmpty()) {
+        isPlacingOrder || hotelClosedMessage != null
+    } else {
+        isCheckoutDisabled
+    }
 
     Scaffold(
         topBar = {
@@ -428,6 +443,14 @@ fun CheckoutScreen(
                     }
                     Button(
                         onClick = {
+                            if (unavailableItems.isNotEmpty()) {
+                                repository.removeCartItems(
+                                    unavailableItems.map { it.cartItem.productId to it.cartItem.variantId },
+                                    isHotel
+                                )
+                                fetchFreshCart()
+                                return@Button
+                            }
                             if (!isLoggedIn || userId.isNullOrBlank()) {
                                 onRequireLogin()
                                 return@Button
@@ -546,6 +569,14 @@ fun CheckoutScreen(
                                         authoritativeDiscount = 0.0
                                         couponErrorMessage = err
                                     }
+                                    // An item changed in the last few seconds (RPC re-validates server-side
+                                    // even though our own fresh-cart check just passed) - re-sync so it shows
+                                    // greyed with the one-tap remove option instead of just a dead error.
+                                    if (err.contains("no longer available", ignoreCase = true) ||
+                                        err.contains("not available in your city", ignoreCase = true)
+                                    ) {
+                                        fetchFreshCart()
+                                    }
                                     placementError = err
                                     snackbarHostState.showSnackbar(err)
                                 }
@@ -555,7 +586,7 @@ fun CheckoutScreen(
                             .fillMaxWidth()
                             .height(52.dp)
                             .testTag("place_order_button"),
-                        enabled = !isCheckoutDisabled,
+                        enabled = !isPlaceOrderButtonDisabled,
                         shape = RoundedCornerShape(24.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = NaturalPrimary,
@@ -566,6 +597,8 @@ fun CheckoutScreen(
                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(placingOrderMessage)
+                        } else if (unavailableItems.isNotEmpty()) {
+                            Text("Remove unavailable items & continue", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         } else if (isLoadingDeliveryFee) {
                             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(8.dp))
@@ -621,6 +654,52 @@ fun CheckoutScreen(
             if (placementError != null) {
                 item {
                     ErrorCard(message = placementError!!, onRetry = { placementError = null })
+                }
+            }
+
+            if (hotelClosedMessage != null) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = NaturalBadgeRed.copy(alpha = 0.12f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("hotel_closed_checkout_banner")
+                    ) {
+                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Info, contentDescription = null, tint = NaturalBadgeRed, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                "This hotel is currently closed. You can't place this order right now.",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = NaturalBadgeRed
+                            )
+                        }
+                    }
+                }
+            } else if (unavailableItems.isNotEmpty()) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = NaturalBadgeRed.copy(alpha = 0.12f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, NaturalBadgeRed.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("unavailable_items_checkout_banner")
+                    ) {
+                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Info, contentDescription = null, tint = NaturalBadgeRed, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                "${unavailableItems.size} item(s) in your cart are not available right now. Tap the button below to remove them and continue.",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = NaturalBadgeRed
+                            )
+                        }
+                    }
                 }
             }
 

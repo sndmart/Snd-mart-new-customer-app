@@ -113,6 +113,7 @@ data class ProductVariantCityStock(
     val price: Double = 0.0,
     @Json(name = "stock_qty") val stockQty: Int? = 0,
     @Json(name = "is_available") val isAvailable: Boolean = true,
+    @Json(name = "is_active") val isActive: Boolean = true,
     @Json(name = "city_id") val cityId: String? = null
 )
 
@@ -154,7 +155,8 @@ data class ProductCityStock(
     val price: Double = 0.0,
     val mrp: Double? = null,
     @Json(name = "stock_qty") val stockQty: Int? = 0,
-    @Json(name = "is_available") val isAvailable: Boolean = true
+    @Json(name = "is_available") val isAvailable: Boolean = true,
+    @Json(name = "is_active") val isActive: Boolean = true
 )
 
 // UI Model: Individual resolved variant for the selected city
@@ -236,14 +238,40 @@ data class CartItem(
     val quantity: Int = 1
 )
 
+/** Live availability state for a cart row, recomputed every time the cart/checkout screen
+ * loads fresh data - see SndmartRepository.getFreshCartItems(). */
+enum class CartAvailabilityState { OK, UNAVAILABLE, OUT_OF_STOCK, QTY_REDUCED }
+
+/** Sentinel stateMessage used when the whole hotel (not this one item) is closed/inactive, so
+ * the UI can show a single "hotel closed" banner instead of labelling every item individually. */
+const val CART_HOTEL_CLOSED_MESSAGE = "Hotel is currently closed"
+
+/**
+ * Last-known display info for a cart product/variant, cached locally (UserSessionManager) at
+ * add-to-cart time. Once a product is turned off, RLS stops a customer's own queries from
+ * returning that row at all (verified directly against the DB) - without this cache a
+ * deactivated cart item would have no name/image left to show, only "No longer available"
+ * with nothing to identify which item that is.
+ */
+data class CartProductSnapshot(
+    val name: String,
+    val imageUrl: String?,
+    val unit: String?
+)
+
 // UI Model for Cart item with freshly fetched product data and variant resolution
 data class CartItemUi(
     val cartItem: CartItem,
     val product: ResolvedProduct,
-    val variant: ResolvedVariant? = null
+    val variant: ResolvedVariant? = null,
+    val availabilityState: CartAvailabilityState = CartAvailabilityState.OK,
+    val stateMessage: String? = null
 ) {
+    val isPurchasable: Boolean
+        get() = availabilityState == CartAvailabilityState.OK || availabilityState == CartAvailabilityState.QTY_REDUCED
     val effectivePrice: Double get() = variant?.price ?: product.effectivePrice
-    val totalPrice: Double get() = effectivePrice * cartItem.quantity
+    // Unavailable/out-of-stock rows never contribute to subtotal/delivery/total.
+    val totalPrice: Double get() = if (isPurchasable) effectivePrice * cartItem.quantity else 0.0
     val displayName: String
         get() = if (variant != null && variant.label.isNotBlank()) {
             "${product.name} - ${variant.label}"

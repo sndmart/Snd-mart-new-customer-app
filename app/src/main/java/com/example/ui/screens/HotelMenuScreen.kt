@@ -517,7 +517,8 @@ fun HotelMenuScreen(
                                             vendorId = vendorId,
                                             cityId = cityId,
                                             quantityDelta = 1,
-                                            isHotel = true
+                                            isHotel = true,
+                                            productForSnapshot = product
                                         )
                                         if (res is AddToCartResult.HotelConflict) {
                                             pendingConflict = res

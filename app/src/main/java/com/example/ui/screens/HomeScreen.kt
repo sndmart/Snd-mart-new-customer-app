@@ -582,7 +582,8 @@ fun HomeScreen(
                     cityId = selectedCity?.id,
                     quantityDelta = delta,
                     isHotel = false,
-                    variantId = variantId
+                    variantId = variantId,
+                    productForSnapshot = prod
                 )
             },
             onDismiss = { variantPickerProduct = null }
@@ -895,7 +896,8 @@ fun HomeScreen(
                                             vendorId = null,
                                             cityId = selectedCity.id,
                                             quantityDelta = 1,
-                                            isHotel = false
+                                            isHotel = false,
+                                            productForSnapshot = product
                                         )
                                     },
                                     onDecrease = {

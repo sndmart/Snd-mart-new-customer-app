@@ -9,6 +9,9 @@ import com.example.data.remote.SupabaseClient
 import com.example.data.session.UserSessionManager
 import com.example.util.PhoneUtils
 import com.example.util.VersionUtils
+import com.example.util.isVendorWithinOperatingHours
+import com.example.util.isWithinAnySlot
+import com.example.util.parseTimeString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1380,6 +1383,52 @@ class SndmartRepository(
     // --- FRESH PRICING FOR CART ITEMS ---
     // Rule: Every render: re-fetch current price per item fresh — never trust a previously-fetched price.
     // Rule 3 & 4: Batch fetch products and city stock overrides in parallel instead of looping N times!
+    private fun formatAvailableFromHint(availableFrom: String?): String {
+        val parsed = availableFrom?.let(::parseTimeString) ?: return "No longer available"
+        return "Available from ${parsed.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US))}"
+    }
+
+    /** Builds the "we lost the live row" fallback: either the product couldn't be resolved at
+     * all (RLS hides a deactivated product from the customer's own queries - verified directly
+     * against the DB), or it resolved but failed one of its own availability checks below. Falls
+     * back to the locally cached name/image from when the item was added, so the row still shows
+     * something recognizable instead of a blank "Item". */
+    private fun unavailableCartItem(
+        item: CartItem,
+        prod: Product?,
+        reason: String
+    ): CartItemUi {
+        val snapshot = if (prod == null) sessionManager.getCachedCartProductSnapshot(item.productId, item.variantId) else null
+        val baseProduct = prod ?: Product(
+            id = item.productId,
+            vendorId = item.vendorId,
+            name = snapshot?.name ?: "Item",
+            imageUrl = snapshot?.imageUrl,
+            unit = snapshot?.unit,
+            isActive = false,
+            isAvailable = false
+        )
+        return CartItemUi(
+            cartItem = item,
+            product = ResolvedProduct(
+                baseProduct = baseProduct,
+                effectivePrice = 0.0,
+                effectiveMrp = null,
+                effectiveStock = 0,
+                effectiveIsAvailable = false
+            ),
+            variant = null,
+            availabilityState = CartAvailabilityState.UNAVAILABLE,
+            stateMessage = reason
+        )
+    }
+
+    // Recomputes live availability for every row in the (grocery or hotel) cart in one batched
+    // round trip - never drops a row even if its product can no longer be read, so the cart can
+    // still show it (greyed, with a reason) and let the customer remove it. Uses the exact same
+    // availability rules the product lists/hotel menu already use (ResolvedProduct.isHotelItemAvailable,
+    // product_city_stock / product_variant_city_stock is_active+is_available), so the cart never
+    // disagrees with what's shown while browsing.
     suspend fun getFreshCartItems(isHotel: Boolean, cityId: String): Result<List<CartItemUi>> {
         val rawCart = (if (isHotel) _hotelCart.value else _groceryCart.value).filter { it.quantity > 0 }
         if (rawCart.isEmpty()) {
@@ -1395,60 +1444,145 @@ class SndmartRepository(
             if (productIds.isEmpty()) {
                 return Result.success(emptyList())
             }
+            val hotelVendorId = if (isHotel) rawCart.firstOrNull { !it.vendorId.isNullOrBlank() }?.vendorId else null
 
-            val (productsMap, stockMap) = kotlinx.coroutines.coroutineScope {
+            var productsMap: Map<String, Product> = emptyMap()
+            var stockMap: Map<String, ProductCityStock> = emptyMap()
+            var vendor: Vendor? = null
+            var vendorSlots: List<OperatingSlot> = emptyList()
+
+            kotlinx.coroutines.coroutineScope {
                 val prodDeferred = async {
                     api.getProductsByIds(
                         idInQuery = "in.(${productIds.joinToString(",")})",
-                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,product_variants(id,label,is_active,product_variant_city_stock(price,stock_qty,is_available,city_id))"
+                        select = "id,category_id,vendor_id,name,description,image_url,price,mrp,unit,stock_qty,is_available,is_active,is_featured,available_from,available_until,product_variants(id,label,is_active,product_variant_city_stock(price,stock_qty,is_available,is_active,city_id))"
                     )
                 }
-                val stockDeferred = async {
+                val stockDeferred = if (!isHotel) async {
                     api.getProductCityStockBatch(
                         cityId = "eq.$cityId",
                         productIdsQuery = "in.(${productIds.joinToString(",")})",
-                        select = "product_id,price,mrp,stock_qty,is_available"
+                        select = "product_id,price,mrp,stock_qty,is_available,is_active"
                     )
-                }
+                } else null
+                val vendorDeferred = if (isHotel && !hotelVendorId.isNullOrBlank()) async { getVendor(hotelVendorId) } else null
+                val slotsDeferred = if (isHotel && !hotelVendorId.isNullOrBlank()) async { getVendorOperatingSlots(hotelVendorId) } else null
+
                 val pRes = prodDeferred.await()
-                val sRes = stockDeferred.await()
-                val pMap = if (pRes.isSuccessful && pRes.body() != null) {
-                    pRes.body()!!.associateBy { it.id }
-                } else emptyMap()
-                val sMap = if (sRes.isSuccessful && sRes.body() != null) {
-                    sRes.body()!!.associateBy { it.productId }
-                } else emptyMap()
-                Pair(pMap, sMap)
+                productsMap = if (pRes.isSuccessful && pRes.body() != null) pRes.body()!!.associateBy { it.id } else emptyMap()
+                val sRes = stockDeferred?.await()
+                stockMap = if (sRes != null && sRes.isSuccessful && sRes.body() != null) sRes.body()!!.associateBy { it.productId } else emptyMap()
+                vendor = vendorDeferred?.await()?.getOrNull()
+                vendorSlots = slotsDeferred?.await()?.getOrNull() ?: emptyList()
             }
+
+            val effectiveSlots = when {
+                vendorSlots.isNotEmpty() -> vendorSlots
+                vendor != null && !vendor!!.openingTime.isNullOrBlank() && !vendor!!.closingTime.isNullOrBlank() -> listOf(
+                    OperatingSlot(vendorId = vendor!!.id, startTime = vendor!!.openingTime!!, endTime = vendor!!.closingTime!!)
+                )
+                else -> emptyList()
+            }
+            val isHotelOpen = !isHotel || (vendor != null && vendor!!.isActive && isWithinAnySlot(effectiveSlots))
 
             val list = mutableListOf<CartItemUi>()
             for (item in rawCart) {
-                var resolvedProd: ResolvedProduct? = null
-                var resolvedVariant: ResolvedVariant? = null
                 val prod = productsMap[item.productId]
-                if (prod != null) {
-                    val override = stockMap[prod.id]
-                    val isGrocery = prod.vendorId == null
-                    val price = override?.price ?: prod.price
-                    val mrp = override?.mrp ?: prod.mrp
-                    val stock = if (isGrocery) (override?.stockQty ?: 0) else (override?.stockQty ?: (prod.stockQty ?: (prod.stockQuantity ?: 0)))
-                    val isAvail = if (isGrocery) (override?.isAvailable == true) else (override?.isAvailable ?: prod.isAvailable)
-                    val resVariants = resolveProductVariants(prod, cityId)
-                    resolvedProd = ResolvedProduct(
-                        baseProduct = prod,
-                        effectivePrice = price,
-                        effectiveMrp = mrp,
-                        effectiveStock = stock,
-                        effectiveIsAvailable = isAvail,
-                        variants = resVariants
-                    )
-                    if (!item.variantId.isNullOrBlank()) {
-                        resolvedVariant = resVariants.firstOrNull { it.id == item.variantId }
-                    }
+
+                if (prod == null) {
+                    list.add(unavailableCartItem(item, null, "No longer available"))
+                    continue
                 }
 
-                if (resolvedProd != null) {
-                    list.add(CartItemUi(cartItem = item, product = resolvedProd, variant = resolvedVariant))
+                // Keep the local fallback snapshot fresh while the product is still resolvable.
+                sessionManager.cacheCartProductSnapshot(item.productId, item.variantId, prod.name, prod.imageUrl, prod.unit)
+
+                if (isHotel) {
+                    val resolvedProd = ResolvedProduct(
+                        baseProduct = prod,
+                        effectivePrice = prod.price,
+                        effectiveMrp = prod.mrp,
+                        effectiveStock = prod.stockQty ?: prod.stockQuantity ?: 0,
+                        effectiveIsAvailable = prod.isAvailable
+                    )
+                    when {
+                        !isHotelOpen -> list.add(
+                            CartItemUi(item, resolvedProd, null, CartAvailabilityState.UNAVAILABLE, CART_HOTEL_CLOSED_MESSAGE)
+                        )
+                        !resolvedProd.isHotelItemAvailable(effectiveSlots) -> {
+                            val hasOwnWindow = !prod.availableFrom.isNullOrBlank() && !prod.availableUntil.isNullOrBlank()
+                            val reason = if (hasOwnWindow && !isVendorWithinOperatingHours(prod.availableFrom, prod.availableUntil)) {
+                                formatAvailableFromHint(prod.availableFrom)
+                            } else {
+                                "No longer available"
+                            }
+                            list.add(CartItemUi(item, resolvedProd, null, CartAvailabilityState.UNAVAILABLE, reason))
+                        }
+                        else -> list.add(CartItemUi(item, resolvedProd, null, CartAvailabilityState.OK, null))
+                    }
+                    continue
+                }
+
+                // Grocery
+                if (!prod.isActive) {
+                    list.add(unavailableCartItem(item, prod, "No longer available"))
+                    continue
+                }
+
+                if (!item.variantId.isNullOrBlank()) {
+                    val rawVariant = prod.productVariants?.firstOrNull { it.id == item.variantId }
+                    val cityStock = rawVariant?.cityStock?.firstOrNull { it.cityId == cityId }
+                    if (rawVariant == null || !rawVariant.isActive || cityStock == null || !cityStock.isActive || !cityStock.isAvailable) {
+                        list.add(unavailableCartItem(item, prod, "No longer available"))
+                        continue
+                    }
+                    val resolvedProd = ResolvedProduct(
+                        baseProduct = prod,
+                        effectivePrice = cityStock.price,
+                        effectiveMrp = null,
+                        effectiveStock = cityStock.stockQty ?: 0,
+                        effectiveIsAvailable = true,
+                        variants = resolveProductVariants(prod, cityId)
+                    )
+                    val resolvedVariant = ResolvedVariant(
+                        id = rawVariant.id,
+                        label = rawVariant.label,
+                        price = cityStock.price,
+                        stockQty = cityStock.stockQty ?: 0,
+                        isAvailable = true
+                    )
+                    val stock = cityStock.stockQty ?: 0
+                    when {
+                        stock <= 0 -> list.add(CartItemUi(item, resolvedProd, resolvedVariant, CartAvailabilityState.OUT_OF_STOCK, "Out of stock"))
+                        item.quantity > stock -> {
+                            updateCartItemQuantity(item.productId, isHotel = false, newQty = stock, variantId = item.variantId)
+                            list.add(CartItemUi(item.copy(quantity = stock), resolvedProd, resolvedVariant, CartAvailabilityState.QTY_REDUCED, "Only $stock left - quantity updated"))
+                        }
+                        else -> list.add(CartItemUi(item, resolvedProd, resolvedVariant, CartAvailabilityState.OK, null))
+                    }
+                } else {
+                    val override = stockMap[prod.id]
+                    if (override == null || !override.isActive || !override.isAvailable) {
+                        list.add(unavailableCartItem(item, prod, "No longer available"))
+                        continue
+                    }
+                    val resolvedProd = ResolvedProduct(
+                        baseProduct = prod,
+                        effectivePrice = override.price,
+                        effectiveMrp = override.mrp,
+                        effectiveStock = override.stockQty ?: 0,
+                        effectiveIsAvailable = true,
+                        variants = resolveProductVariants(prod, cityId)
+                    )
+                    val stock = override.stockQty ?: 0
+                    when {
+                        stock <= 0 -> list.add(CartItemUi(item, resolvedProd, null, CartAvailabilityState.OUT_OF_STOCK, "Out of stock"))
+                        item.quantity > stock -> {
+                            updateCartItemQuantity(item.productId, isHotel = false, newQty = stock, variantId = item.variantId)
+                            list.add(CartItemUi(item.copy(quantity = stock), resolvedProd, null, CartAvailabilityState.QTY_REDUCED, "Only $stock left - quantity updated"))
+                        }
+                        else -> list.add(CartItemUi(item, resolvedProd, null, CartAvailabilityState.OK, null))
+                    }
                 }
             }
             Result.success(list)
@@ -1528,9 +1662,26 @@ class SndmartRepository(
         cityId: String?,
         quantityDelta: Int = 1,
         isHotel: Boolean,
-        variantId: String? = null
+        variantId: String? = null,
+        // Optional: caller's already-resolved product, used only to cache a display snapshot
+        // (name/image/unit) for this cart row. A product can only be added here while it's
+        // visible/active, so this is the one reliable place to capture that - once a product
+        // is turned off later, RLS stops returning that row for this customer at all, and
+        // without this cached snapshot the cart would have nothing left to show but "No longer
+        // available" with no name attached.
+        productForSnapshot: ResolvedProduct? = null
     ): AddToCartResult {
         val currentUserId = sessionManager.userId.value ?: "guest"
+        if (productForSnapshot != null) {
+            val variantLabel = variantId?.let { vid -> productForSnapshot.variants.firstOrNull { it.id == vid }?.label }
+            sessionManager.cacheCartProductSnapshot(
+                productId = productId,
+                variantId = variantId,
+                name = if (!variantLabel.isNullOrBlank()) "${productForSnapshot.name} - $variantLabel" else productForSnapshot.name,
+                imageUrl = productForSnapshot.imageUrl,
+                unit = productForSnapshot.unit
+            )
+        }
         if (isHotel) {
             val currentList = _hotelCart.value
             val existingVendor = currentList.firstOrNull { it.vendorId != null }?.vendorId
@@ -1631,6 +1782,19 @@ class SndmartRepository(
             _hotelCart.value = emptyList()
         } else {
             _groceryCart.value = emptyList()
+        }
+        persistCartToBackend()
+    }
+
+    /** Removes several cart rows (by productId+variantId) in one state update - used by the
+     * "Remove unavailable items" bulk action, so it's one persist instead of N. */
+    fun removeCartItems(keys: List<Pair<String, String?>>, isHotel: Boolean) {
+        if (keys.isEmpty()) return
+        val keySet = keys.toSet()
+        if (isHotel) {
+            _hotelCart.value = _hotelCart.value.filter { (it.productId to it.variantId) !in keySet }
+        } else {
+            _groceryCart.value = _groceryCart.value.filter { (it.productId to it.variantId) !in keySet }
         }
         persistCartToBackend()
     }
